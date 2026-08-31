@@ -73,6 +73,13 @@ the pilot:
 GCP_PROJECT=your-project-id deploy/gcp/deploy-cloud-run.sh
 ```
 
+If the deployer can write Artifact Registry images but cannot submit Cloud
+Build jobs, build and push the same images from the local Docker engine:
+
+```bash
+BUILD_METHOD=local GCP_PROJECT=your-project-id deploy/gcp/deploy-cloud-run.sh
+```
+
 Optional overrides:
 
 ```bash

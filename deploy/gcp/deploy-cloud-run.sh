@@ -8,6 +8,7 @@ CLOUD_RUN_SERVICE="${CLOUD_RUN_SERVICE:-oasis-pilot}"
 ARTIFACT_REPOSITORY="${ARTIFACT_REPOSITORY:-cloud-run-source-deploy}"
 RUNTIME_SERVICE_ACCOUNT_EMAIL="${RUNTIME_SERVICE_ACCOUNT_EMAIL:-taskcrafter-staging-run@${GCP_PROJECT}.iam.gserviceaccount.com}"
 SQL_INSTANCE="${SQL_INSTANCE:-oasis-postgres}"
+BUILD_METHOD="${BUILD_METHOD:-cloud-build}"
 
 if [[ -z "$GCP_PROJECT" || "$GCP_PROJECT" == "(unset)" ]]; then
   echo "Set GCP_PROJECT or select a gcloud project." >&2
@@ -38,16 +39,27 @@ for secret in oasis-app-secret-key oasis-postgres-password oasis-admin-password 
     --quiet >/dev/null
 done
 
-gcloud builds submit "$ROOT_DIR/backend" \
-  --project "$GCP_PROJECT" \
-  --region "$GCP_REGION" \
-  --tag "$BACKEND_IMAGE" \
-  --quiet
-gcloud builds submit "$ROOT_DIR/frontend" \
-  --project "$GCP_PROJECT" \
-  --region "$GCP_REGION" \
-  --tag "$FRONTEND_IMAGE" \
-  --quiet
+if [[ "$BUILD_METHOD" == "local" ]]; then
+  gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+  docker build --tag "$BACKEND_IMAGE" "$ROOT_DIR/backend"
+  docker push "$BACKEND_IMAGE"
+  docker build --tag "$FRONTEND_IMAGE" "$ROOT_DIR/frontend"
+  docker push "$FRONTEND_IMAGE"
+elif [[ "$BUILD_METHOD" == "cloud-build" ]]; then
+  gcloud builds submit "$ROOT_DIR/backend" \
+    --project "$GCP_PROJECT" \
+    --region "$GCP_REGION" \
+    --tag "$BACKEND_IMAGE" \
+    --quiet
+  gcloud builds submit "$ROOT_DIR/frontend" \
+    --project "$GCP_PROJECT" \
+    --region "$GCP_REGION" \
+    --tag "$FRONTEND_IMAGE" \
+    --quiet
+else
+  echo "BUILD_METHOD must be cloud-build or local." >&2
+  exit 1
+fi
 
 export GCP_PROJECT GCP_REGION CLOUD_RUN_SERVICE RUNTIME_SERVICE_ACCOUNT_EMAIL
 export BACKEND_IMAGE FRONTEND_IMAGE SOURCE_CODE_URL CLOUD_SQL_CONNECTION_NAME
