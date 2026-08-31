@@ -62,6 +62,17 @@ GCP_PROJECT=your-project-id \
 deploy/gcp/release-and-provision.sh
 ```
 
+When Compute Engine permissions are unavailable but Cloud Run is approved, the
+same application can run as a single, multi-container Cloud Run service. Nginx
+serves the participant UI and proxies HTTP/WebSocket traffic to the backend;
+Cloud SQL remains durable storage and Redis is a one-instance coordination
+sidecar. The service is intentionally capped at one always-warm instance for
+the pilot:
+
+```bash
+GCP_PROJECT=your-project-id deploy/gcp/deploy-cloud-run.sh
+```
+
 Optional overrides:
 
 ```bash

@@ -1,0 +1,145 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ${CLOUD_RUN_SERVICE}
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "1"
+        autoscaling.knative.dev/minScale: "1"
+        run.googleapis.com/container-dependencies: '{"frontend":["backend"],"backend":["cloud-sql-proxy","redis"]}'
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 30
+      serviceAccountName: ${RUNTIME_SERVICE_ACCOUNT_EMAIL}
+      timeoutSeconds: 3600
+      containers:
+        - name: frontend
+          image: ${FRONTEND_IMAGE}
+          env:
+            - name: BACKEND_UPSTREAM
+              value: 127.0.0.1:8000
+          ports:
+            - containerPort: 8080
+              name: http1
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            failureThreshold: 30
+            periodSeconds: 5
+            tcpSocket:
+              port: 8080
+            timeoutSeconds: 5
+        - name: backend
+          image: ${BACKEND_IMAGE}
+          env:
+            - name: APP_NAME
+              value: OASIS
+            - name: APP_ENV
+              value: production
+            - name: DEBUG
+              value: "false"
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: oasis-app-secret-key
+            - name: POSTGRES_USER
+              value: oasis
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: oasis-postgres-password
+            - name: POSTGRES_DB
+              value: oasis
+            - name: POSTGRES_HOST
+              value: 127.0.0.1
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: DATABASE_POOL_SIZE
+              value: "5"
+            - name: DATABASE_MAX_OVERFLOW
+              value: "5"
+            - name: DATABASE_POOL_TIMEOUT_SECONDS
+              value: "30"
+            - name: WEB_CONCURRENCY
+              value: "2"
+            - name: REDIS_URL
+              value: redis://127.0.0.1:6379/0
+            - name: SOURCE_CODE_URL
+              value: ${SOURCE_CODE_URL}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: oasis-openai-api-key
+            - name: OPENAI_USE_EU
+              value: "false"
+            - name: AUTH_ENABLED
+              value: "true"
+            - name: AUTH_USERNAME
+              value: admin
+            - name: AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: oasis-admin-password
+            - name: AUDIO_STORAGE_BACKEND
+              value: local
+            - name: AUDIO_STORAGE_LOCAL_PATH
+              value: /tmp/oasis-recordings
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          startupProbe:
+            failureThreshold: 40
+            periodSeconds: 5
+            tcpSocket:
+              port: 8000
+            timeoutSeconds: 5
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.2
+          args:
+            - --address=0.0.0.0
+            - --port=5432
+            - ${CLOUD_SQL_CONNECTION_NAME}
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            failureThreshold: 30
+            periodSeconds: 5
+            tcpSocket:
+              port: 5432
+            timeoutSeconds: 5
+        - name: redis
+          image: redis:7-alpine
+          args:
+            - redis-server
+            - --appendonly
+            - "no"
+            - --save
+            - ""
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            failureThreshold: 20
+            periodSeconds: 3
+            tcpSocket:
+              port: 6379
+            timeoutSeconds: 3
+  traffic:
+    - latestRevision: true
+      percent: 100
