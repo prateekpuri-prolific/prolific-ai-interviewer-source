@@ -132,8 +132,12 @@ else
   git -C "$PUBLISH_DIR" push origin HEAD:main >&2
 fi
 
-git -C "$PUBLISH_DIR" tag -a "$SOURCE_TAG" -m "Corresponding source for ${SHORT_SHA}"
-git -C "$PUBLISH_DIR" push origin "$SOURCE_TAG" >&2
+if git -C "$PUBLISH_DIR" show-ref --verify --quiet "refs/tags/$SOURCE_TAG"; then
+  echo "Reusing existing source tag $SOURCE_TAG." >&2
+else
+  git -C "$PUBLISH_DIR" tag -a "$SOURCE_TAG" -m "Corresponding source for ${SHORT_SHA}"
+  git -C "$PUBLISH_DIR" push origin "$SOURCE_TAG" >&2
+fi
 
 RELEASE_URL="$(gh release create "$SOURCE_TAG" \
   --repo "$PUBLIC_SOURCE_REPO" \
