@@ -72,6 +72,18 @@ GCP_PROJECT=your-project-id \
 deploy/gcp/release-and-provision.sh
 ```
 
+If organization policy prevents your account from changing project IAM, an
+administrator can provide an existing runtime service account that already has
+Cloud SQL Client permission. The deployer writes application secrets into a
+root-readable environment file on the VM, so the runtime account does not need
+Secret Manager access:
+
+```bash
+RUNTIME_SERVICE_ACCOUNT_EMAIL=approved-runtime@your-project.iam.gserviceaccount.com \
+GCP_PROJECT=your-project-id \
+deploy/gcp/release-and-provision.sh
+```
+
 The source publisher and provisioner are idempotent. An already-published commit
 reuses its release URL; infrastructure is reused, migrations are applied, the
 containers are rebuilt, and the public dependency-aware health check must pass.

@@ -13,6 +13,7 @@ VM_NAME="${VM_NAME:-oasis-pilot}"
 SQL_INSTANCE="${SQL_INSTANCE:-oasis-postgres}"
 ADDRESS_NAME="${ADDRESS_NAME:-oasis-pilot-ip}"
 SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-oasis-pilot-runtime}"
+RUNTIME_SERVICE_ACCOUNT_EMAIL="${RUNTIME_SERVICE_ACCOUNT_EMAIL:-}"
 DB_NAME="${DB_NAME:-oasis}"
 DB_USER="${DB_USER:-oasis}"
 SOURCE_CODE_URL="${SOURCE_CODE_URL:-}"
@@ -56,20 +57,26 @@ gcloud services enable \
   serviceusage.googleapis.com \
   --project "$GCP_PROJECT"
 
-SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
-if ! gcloud iam service-accounts describe "$SERVICE_ACCOUNT_EMAIL" --project "$GCP_PROJECT" >/dev/null 2>&1; then
-  gcloud iam service-accounts create "$SERVICE_ACCOUNT_NAME" \
-    --display-name="OASIS pilot runtime" \
-    --project "$GCP_PROJECT"
-fi
+if [[ -n "$RUNTIME_SERVICE_ACCOUNT_EMAIL" ]]; then
+  SERVICE_ACCOUNT_EMAIL="$RUNTIME_SERVICE_ACCOUNT_EMAIL"
+  gcloud iam service-accounts describe "$SERVICE_ACCOUNT_EMAIL" \
+    --project "$GCP_PROJECT" >/dev/null
+else
+  SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
+  if ! gcloud iam service-accounts describe "$SERVICE_ACCOUNT_EMAIL" --project "$GCP_PROJECT" >/dev/null 2>&1; then
+    gcloud iam service-accounts create "$SERVICE_ACCOUNT_NAME" \
+      --display-name="OASIS pilot runtime" \
+      --project "$GCP_PROJECT"
+  fi
 
-for role in roles/cloudsql.client roles/secretmanager.secretAccessor roles/logging.logWriter roles/monitoring.metricWriter; do
-  gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
-    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="$role" \
-    --condition=None \
-    --quiet >/dev/null
-done
+  for role in roles/cloudsql.client roles/secretmanager.secretAccessor roles/logging.logWriter roles/monitoring.metricWriter; do
+    gcloud projects add-iam-policy-binding "$GCP_PROJECT" \
+      --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+      --role="$role" \
+      --condition=None \
+      --quiet >/dev/null
+  done
+fi
 
 ensure_generated_secret() {
   local name="$1"
