@@ -699,6 +699,14 @@ def question_intents(question: dict, index: int) -> dict[str, object]:
     }
 
 
+def evidence_skipping_enabled(guide: dict, allow_follow_ups: bool) -> bool:
+    """Resolve the independent evidence-skip setting with legacy parity."""
+    configured = guide.get("skip_answered_questions")
+    if configured is None:
+        return allow_follow_ups
+    return bool(configured)
+
+
 def parse_turn_decision(payload: str) -> Optional[TurnDecision]:
     """Parse and conservatively validate a hidden ``[[TURN {...}]]`` value."""
     try:
@@ -832,7 +840,9 @@ def progress_marker_instruction(total: int) -> str:
 
 
 def turn_decision_instruction(
-    questions: list[dict], allow_follow_ups: bool = True
+    questions: list[dict],
+    allow_follow_ups: bool = True,
+    skip_answered_questions: bool = True,
 ) -> str:
     """Prompt fragment for same-call evidence state, hidden from participants."""
     conditional_questions = [
@@ -853,7 +863,7 @@ def turn_decision_instruction(
         else "Always set `not_applicable_question` to null; conditional module "
         "skipping is not enabled for any question in this guide."
     )
-    if not allow_follow_ups:
+    if not allow_follow_ups and not skip_answered_questions:
         catalog = "\n".join(
             f"- Question {index + 1} main intent: "
             f"{question_intents(question, index)['main']}"
@@ -879,11 +889,56 @@ after the participant answers the final predefined question.
 Allowed main intent IDs:
 {catalog}
 """
+    if not allow_follow_ups:
+        catalog_lines: list[str] = []
+        for index, question in enumerate(questions):
+            intents = question_intents(question, index)
+            protected = " (protected; always ask)" if question.get("always_ask") else ""
+            catalog_lines.append(
+                f"- Question {index + 1} main intent: {intents['main']}{protected}"
+            )
+            for evidence_id, goal in intents["evidence"].items():
+                catalog_lines.append(f"  Evidence {evidence_id}: {goal}")
+            catalog_lines.append(
+                "  Coverage clarification intent: "
+                f"{intents['question_id']}:emergent:clarification"
+            )
+        catalog = "\n".join(catalog_lines)
+        return f"""
+
+### Turn decision marker (hidden, required on EVERY response)
+Before the visible words of every response, emit exactly one compact JSON
+marker on one line:
+[[TURN {{"action":"main|probe|clarify|close","question":2,"intent":"an allowed intent ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"focal_entity":"optional short non-identifying task label","provenance":"direct|second_hand|opinion|mixed|unknown","not_applicable_question":null}}]]
+
+This marker is private control data and is automatically removed. Follow-up
+probing is disabled, but evidence-aware skipping is enabled. Report explicit
+evidence from the participant's latest answer across the full guide. Mark an
+evidence item `covered` only when the answer supplies concrete, analyzable
+detail; a mention or inference is only `partial`. A future question may be
+skipped only when EVERY one of its evidence items is `covered`. Questions
+marked protected must always be asked, even if their evidence appeared early.
+
+Use `action="main"` for the first required question in guide order. When a
+future unprotected question is only partially answered, you may use
+`action="probe"` once with that question's coverage-clarification intent and
+ask one short question for the single most important missing detail. This is
+evidence repair, not permission for exploratory or repeated follow-ups. Name
+the relevant task in the visible wording whenever prior coverage causes you
+to move past one or more cards. Use `action="clarify"` only for a participant's
+procedural interruption and `close` only when no required card remains.
+
+{applicability_rule}
+
+Allowed intents and evidence IDs:
+{catalog}
+"""
     catalog_lines: list[str] = []
     for index, question in enumerate(questions):
         intents = question_intents(question, index)
+        protected = " (protected; always ask)" if question.get("always_ask") else ""
         catalog_lines.append(
-            f"- Question {index + 1} main intent: {intents['main']}"
+            f"- Question {index + 1} main intent: {intents['main']}{protected}"
         )
         for evidence_id, goal in intents["evidence"].items():
             catalog_lines.append(f"  Evidence {evidence_id}: {goal}")
@@ -894,6 +949,15 @@ Allowed main intent IDs:
         )
 
     catalog = "\n".join(catalog_lines)
+    skip_policy_rule = (
+        "Evidence-aware skipping is enabled. Skip only unprotected questions "
+        "whose complete evidence set is concretely `covered`; always ask a "
+        "question marked protected. Name the focal task when a skip would "
+        "otherwise leave a pronoun or reference ambiguous."
+        if skip_answered_questions
+        else "Evidence-aware skipping is disabled. Evidence may guide probes, "
+        "but every predefined main question must still be asked in order."
+    )
     return f"""
 
 ### Turn decision marker (hidden, required on EVERY response)
@@ -906,6 +970,8 @@ participant sees or hears the response. Put nothing before it, never mention
 it, and do not wrap it in Markdown. Use strict JSON with double quotes.
 
 {applicability_rule}
+
+{skip_policy_rule}
 
 Decision rules:
 - `question` is the 1-based guide question your visible response belongs to.
@@ -1134,6 +1200,7 @@ def build_structured_prompt(
     # and no extra latency since the model already has the whole list.
     relevance = (guide.get("probe_selection") or "ordered").lower() == "relevance"
     allow_follow_ups = guide.get("allow_follow_ups", True) is not False
+    skip_answered_questions = evidence_skipping_enabled(guide, allow_follow_ups)
     allow_emergent = allow_follow_ups and bool(
         guide.get("allow_emergent_follow_ups", False)
     )
@@ -1163,6 +1230,11 @@ def build_structured_prompt(
                 "Applicability rule: if the participant explicitly answers "
                 "none or says this does not apply, skip the remaining "
                 "consecutive questions in this module."
+            )
+        if q.get("always_ask"):
+            guide_lines.append(
+                "Evidence-skip rule: protected anchor; always ask this main "
+                "question even when its evidence appeared earlier."
             )
         guide_lines.append(f"Interview phase: {q.get('phase', 'core')}")
         if q.get("purpose"):
@@ -1255,6 +1327,14 @@ def build_structured_prompt(
             "probes; use only the guide."
         )
 
+    coverage_rule = (
+        "Preserve their order, but skip an unprotected question only when "
+        "every one of its evidence goals was concretely covered earlier. "
+        "A mention, inference, or partial answer is not enough to skip it."
+        if skip_answered_questions
+        else "Preserve their order and ask every predefined main question."
+    )
+
     structured_section = f"""
 
 ---
@@ -1262,9 +1342,7 @@ def build_structured_prompt(
 ## INTERVIEW PROTOCOL
 
 You are conducting a structured interview. There are {len(questions)} guide
-questions. Preserve their order, but do not ask a question whose evidence the
-participant has already supplied, explicitly cannot supply, declined, or shown
-is not applicable. The conversation normally follows this turn pattern:
+questions. {coverage_rule} The conversation normally follows this turn pattern:
 
   Q1 (main) → user → zero to the configured maximum follow-ups → Q2 → ...
 
@@ -1293,9 +1371,9 @@ Hard rules:
   do not ask it again, even rephrased — move to the probes.
 - Treat the participant's answer as conversation state, not just a response to
   the last prompt. Before asking anything, check whether they already answered
-  its intent elsewhere. Never request another "example," "recent moment," or
-  explanation of a distinction they have already made simply because a later
-  guide item asks for it.
+  its intent elsewhere. When evidence-aware skipping is enabled, protected
+  anchors still must be asked and only fully covered unprotected cards may be
+  skipped.
 - Preserve momentum without surrendering the guide. If a participant gives a
   long, haphazard answer spanning several topics, silently update all supported
   evidence states, briefly ground the next turn in their most relevant exact
@@ -1395,7 +1473,7 @@ If unsure which probe you already asked, do not repeat it. Choose a different
 relevant move or advance. You do not need to exhaust the listed probes.
 """
 
-    if not allow_follow_ups:
+    if not allow_follow_ups and not skip_answered_questions:
         structured_section += """
 
 ### FIXED SURVEY OVERRIDE
@@ -1406,10 +1484,23 @@ skip, or replace a main question because its topic appeared earlier. If the
 participant asks for clarification, explain briefly without asking a new
 question, then repeat the same pending predefined main question.
 """
+    elif not allow_follow_ups:
+        structured_section += """
+
+### EVIDENCE-AWARE FIXED SURVEY OVERRIDE
+Exploratory and listed follow-ups are disabled. Ask protected anchors exactly
+as written. You may skip an unprotected main question only after every one of
+its evidence goals is concretely covered. If an unprotected future card is
+partial, ask at most one short missing-evidence clarification; do not explore
+beyond that repair. When moving across skipped cards, name the participant's
+task in the next question so references such as "that task" stay unambiguous.
+"""
 
     prompt = base_prompt.rstrip() + structured_section
     if emit_progress:
-        prompt += turn_decision_instruction(questions, allow_follow_ups)
+        prompt += turn_decision_instruction(
+            questions, allow_follow_ups, skip_answered_questions
+        )
         prompt += progress_marker_instruction(len(questions))
     return prompt
 
@@ -1691,6 +1782,9 @@ class EvidenceStateTracker:
         *,
         probe_selection: str = "ordered",
         allow_emergent_follow_ups: bool = False,
+        allow_follow_ups: bool = True,
+        skip_answered_questions: bool = True,
+        allow_coverage_clarifications: bool = False,
     ):
         self._questions = questions
         self._closing = closing
@@ -1698,6 +1792,11 @@ class EvidenceStateTracker:
             "relevance" if str(probe_selection).lower() == "relevance" else "ordered"
         )
         self._allow_emergent_follow_ups = bool(allow_emergent_follow_ups)
+        self._allow_follow_ups = bool(allow_follow_ups)
+        self._skip_answered_questions = bool(skip_answered_questions)
+        self._allow_coverage_clarifications = bool(
+            allow_coverage_clarifications
+        )
         self._catalog = [
             question_intents(question, index)
             for index, question in enumerate(questions)
@@ -1747,9 +1846,30 @@ class EvidenceStateTracker:
             for evidence_id in evidence
         )
 
+    def _question_protected(self, index: int) -> bool:
+        return bool(self._questions[index].get("always_ask"))
+
+    def _question_skippable(self, index: int) -> bool:
+        evidence = set(self._catalog[index]["evidence"])
+        statuses = {self._resolutions.get(evidence_id) for evidence_id in evidence}
+        return (
+            self._skip_answered_questions
+            and not self._question_protected(index)
+            and bool(evidence)
+            and (
+                statuses == {"covered"}
+                # Terminal non-answers are accepted only for the question the
+                # participant was actually answering, so retaining this
+                # legacy path cannot silently dispose of unasked future cards.
+                or statuses.issubset(
+                    {"covered", "unknown", "declined", "not_applicable"}
+                )
+            )
+        )
+
     def _next_unresolved(self, start: int) -> Optional[int]:
         for index in range(max(0, start), len(self._questions)):
-            if self._question_resolved(index):
+            if self._question_skippable(index):
                 self._covered_questions_skipped += 1
                 continue
             return index
@@ -1758,17 +1878,19 @@ class EvidenceStateTracker:
     def _peek_next_unresolved(self, start: int) -> Optional[int]:
         """Find the next question without mutating observability counters."""
         for index in range(max(0, start), len(self._questions)):
-            if not self._question_resolved(index):
+            if not self._question_skippable(index):
                 return index
         return None
 
     def _allowed_intents(self, index: int) -> set[str]:
         catalog = self._catalog[index]
-        return {
-            str(catalog["main"]),
-            *catalog["probes"].keys(),
-            *catalog["emergent"],
-        }
+        allowed = {str(catalog["main"])}
+        if self._allow_follow_ups:
+            allowed.update(catalog["probes"].keys())
+            allowed.update(catalog["emergent"])
+        elif self._allow_coverage_clarifications:
+            allowed.add(f"{catalog['question_id']}:emergent:clarification")
+        return allowed
 
     def _question_has_evidence(self, index: int) -> bool:
         return any(
@@ -1783,6 +1905,8 @@ class EvidenceStateTracker:
         )
 
     def _available_listed_probe(self, index: int) -> Optional[tuple[str, str]]:
+        if not self._allow_follow_ups:
+            return None
         for intent, text in self._catalog[index]["probes"].items():
             if intent not in self._asked_intents and str(text).strip():
                 return str(intent), str(text).strip()
@@ -1815,6 +1939,14 @@ class EvidenceStateTracker:
         replacement_text: Optional[str] = None
         reason: Optional[str] = None
 
+        is_coverage_clarification = (
+            self._allow_coverage_clarifications
+            and not self._allow_follow_ups
+            and intent == f"{catalog['question_id']}:emergent:clarification"
+            and decision.action == "probe"
+        )
+        if is_coverage_clarification:
+            return text, decision, False, None
         if intent in catalog["emergent"] and not self._allow_emergent_follow_ups:
             self._emergent_probes_blocked += 1
             reason = "emergent_probes_disabled"
@@ -1931,14 +2063,26 @@ class EvidenceStateTracker:
             replacement_question=next_index + 1,
             replacement_intent=intent,
         )
+        visible = str(self._questions[next_index].get("text") or "").strip()
+        if next_index > start:
+            visible = self._contextual_question_text(next_index, visible)
         return TurnReview(
-            text=str(self._questions[next_index].get("text") or "").strip(),
+            text=visible,
             marker=next_index + 1,
             decision=decision,
             replaced=True,
             reason=reason,
             question_index=next_index,
         )
+
+    def _contextual_question_text(self, index: int, text: str) -> str:
+        """Keep pronouns unambiguous after one or more evidence-based skips."""
+        label = re.sub(r"[^a-zA-Z0-9 _-]", "", self._latest_focal_entity or "")
+        label = re.sub(r"[_-]+", " ", label).strip()
+        if not label or len(label.split()) > 10 or not text:
+            return text
+        lowered = text[0].lower() + text[1:]
+        return f"Thinking about the {label}, {lowered}"
 
     def _probe_replacement(self, index: int, reason: str) -> Optional[TurnReview]:
         available = self._available_listed_probe(index)
@@ -2053,7 +2197,14 @@ class EvidenceStateTracker:
             self._latest_provenance = decision.provenance
 
         if decision.action == "close":
-            next_index = self._next_unresolved(current_index + 1)
+            current_main_asked = (
+                0 <= current_index < len(self._catalog)
+                and str(self._catalog[current_index]["main"])
+                in self._asked_intents
+            )
+            next_index = self._next_unresolved(
+                current_index + 1 if current_main_asked else current_index
+            )
             if next_index is not None:
                 self._invalid_decisions += 1
                 return self._replacement(next_index, "premature_close")
@@ -2138,6 +2289,23 @@ class EvidenceStateTracker:
                 decision=decision,
                 question_index=question_index,
             )
+
+        if decision.action in {"probe", "thread"} and not self._allow_follow_ups:
+            has_partial_evidence = any(
+                self._resolutions.get(evidence_id) == "partial"
+                for evidence_id in self._catalog[question_index]["evidence"]
+            )
+            valid_coverage_repair = (
+                decision.action == "probe"
+                and self._allow_coverage_clarifications
+                and not self._question_protected(question_index)
+                and has_partial_evidence
+                and intent
+                == f"{self._catalog[question_index]['question_id']}:emergent:clarification"
+            )
+            if not valid_coverage_repair:
+                self._probe_policy_corrections += 1
+                return self._replacement(question_index, "coverage_repair_not_allowed")
 
         policy_replaced = False
         policy_reason: Optional[str] = None
@@ -2315,6 +2483,8 @@ class EvidenceStateTracker:
         if (
             decision.action == "main"
             and intent not in self._asked_intents
+            and self._skip_answered_questions
+            and not self._question_protected(question_index)
             and self._question_has_evidence(question_index)
             and not self._question_resolved(question_index)
         ):
@@ -2334,13 +2504,15 @@ class EvidenceStateTracker:
                 and str(self._catalog[current_index]["main"])
                 in self._asked_intents
             )
+            skipped_current = (
+                0 <= current_index < len(self._catalog)
+                and not current_main_asked
+                and self._question_skippable(current_index)
+            )
             expected_start = (
                 current_index + 1
                 if current_main_asked
-                or (
-                    0 <= current_index < len(self._catalog)
-                    and self._question_resolved(current_index)
-                )
+                or skipped_current
                 else current_index
             )
             expected = self._peek_next_unresolved(expected_start)
@@ -2367,8 +2539,14 @@ class EvidenceStateTracker:
                     else "backward_question"
                 )
                 return self._replacement(expected, reason)
-            if question_index > expected_start:
-                self._covered_questions_skipped += question_index - expected_start
+            skipped_count = question_index - expected_start + int(skipped_current)
+            if skipped_count > 0:
+                self._covered_questions_skipped += skipped_count
+                contextual = self._contextual_question_text(question_index, text)
+                if contextual != text:
+                    text = contextual
+                    policy_replaced = True
+                    policy_reason = "task_context_after_skip"
         elif decision.action == "probe" and question_index != current_index:
             current_main_asked = (
                 0 <= current_index < len(self._catalog)
@@ -2429,7 +2607,16 @@ class EvidenceStateTracker:
             self._duplicate_intents_blocked += 1
             return self._replacement(question_index + 1, "duplicate_intent")
 
-        if self._question_resolved(question_index):
+        required_main_not_yet_asked = (
+            decision.action == "main"
+            and str(self._catalog[question_index]["main"])
+            not in self._asked_intents
+            and (
+                not self._skip_answered_questions
+                or self._question_protected(question_index)
+            )
+        )
+        if self._question_resolved(question_index) and not required_main_not_yet_asked:
             if decision.action == "probe":
                 self._resolved_probes_blocked += 1
             return self._replacement(question_index + 1, "question_resolved")
@@ -2532,6 +2719,9 @@ class InterviewGuideProcessor(FrameProcessor):
         self._language = language or "en"
         self._questions = list(self._guide.get("questions") or [])
         self._allow_follow_ups = self._guide.get("allow_follow_ups", True) is not False
+        self._skip_answered_questions = evidence_skipping_enabled(
+            self._guide, self._allow_follow_ups
+        )
         self._closing = self._guide.get("closing_message", DEFAULT_CLOSING)
         self.current_question_index = 0
         self._bot_turns_on_question = 0
@@ -2547,6 +2737,11 @@ class InterviewGuideProcessor(FrameProcessor):
             probe_selection=self._guide.get("probe_selection", "ordered"),
             allow_emergent_follow_ups=bool(
                 self._guide.get("allow_emergent_follow_ups", False)
+            ),
+            allow_follow_ups=self._allow_follow_ups,
+            skip_answered_questions=self._skip_answered_questions,
+            allow_coverage_clarifications=(
+                self._skip_answered_questions and not self._allow_follow_ups
             ),
         )
         # Bot turns that happen *before* the participant has spoken (the
@@ -2615,7 +2810,7 @@ class InterviewGuideProcessor(FrameProcessor):
         """Validate semantic turn state before modular voice reaches TTS."""
         if not participant_text:
             participant_text = " ".join(self._user_buffer)
-        if not self._allow_follow_ups:
+        if not self._allow_follow_ups and not self._skip_answered_questions:
             if decision is not None and decision.not_applicable_question is not None:
                 conditional_review = self._evidence.review(
                     text,
@@ -2861,6 +3056,9 @@ class TextStructuredController:
         self._questions = list(guide.get("questions") or [])
         self._closing = guide.get("closing_message", DEFAULT_CLOSING)
         self._allow_follow_ups = guide.get("allow_follow_ups", True) is not False
+        self._skip_answered_questions = evidence_skipping_enabled(
+            guide, self._allow_follow_ups
+        )
         self._language = language or "en"
         self.current_question_index = 0
         self._bot_turns_on_question = 0
@@ -2878,6 +3076,11 @@ class TextStructuredController:
             probe_selection=guide.get("probe_selection", "ordered"),
             allow_emergent_follow_ups=bool(
                 guide.get("allow_emergent_follow_ups", False)
+            ),
+            allow_follow_ups=self._allow_follow_ups,
+            skip_answered_questions=self._skip_answered_questions,
+            allow_coverage_clarifications=(
+                self._skip_answered_questions and not self._allow_follow_ups
             ),
         )
         self._last_question_text = (
@@ -3027,7 +3230,7 @@ class TextStructuredController:
         participant_text: str = "",
     ) -> TurnReview:
         """Validate the model's proposed turn and replace semantic repeats."""
-        if not self._allow_follow_ups:
+        if not self._allow_follow_ups and not self._skip_answered_questions:
             if decision is not None and decision.not_applicable_question is not None:
                 conditional_review = self._evidence.review(
                     text,

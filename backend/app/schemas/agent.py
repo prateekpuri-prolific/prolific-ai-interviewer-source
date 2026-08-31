@@ -54,6 +54,13 @@ class InterviewQuestion(BaseModel):
             "remaining consecutive questions in this question's module."
         ),
     )
+    always_ask: bool = Field(
+        False,
+        description=(
+            "Protect a task or module anchor from evidence-based skipping, "
+            "even when its evidence was supplied earlier."
+        ),
+    )
     role_variants: dict[str, str | dict] = Field(
         default_factory=dict,
         description=(
@@ -84,6 +91,14 @@ class InterviewGuide(BaseModel):
             "Whether the interviewer may ask follow-up questions. When false, "
             "the interviewer asks only the predefined main questions in order; "
             "per-question probes and follow-up caps are ignored."
+        ),
+    )
+    skip_answered_questions: bool | None = Field(
+        None,
+        description=(
+            "Whether questions whose full evidence goal was supplied earlier "
+            "may be skipped. Null preserves the legacy behavior: enabled for "
+            "semi-structured guides and disabled for fixed surveys."
         ),
     )
     probe_selection: Literal["ordered", "relevance"] = Field(

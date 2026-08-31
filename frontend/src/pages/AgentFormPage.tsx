@@ -55,6 +55,7 @@ interface InterviewQuestion {
   do_not_assume: string[];
   priority: "required" | "optional";
   sensitivity: "standard" | "elevated";
+  always_ask: boolean;
 }
 
 type ProbeSelection = "ordered" | "relevance";
@@ -63,6 +64,7 @@ interface InterviewGuide {
   questions: InterviewQuestion[];
   closing_message: string;
   allow_follow_ups: boolean;
+  skip_answered_questions: boolean;
   probe_selection: ProbeSelection;
   allow_emergent_follow_ups: boolean;
 }
@@ -80,6 +82,7 @@ const EMPTY_QUESTION: InterviewQuestion = {
   do_not_assume: [],
   priority: "required",
   sensitivity: "standard",
+  always_ask: false,
 };
 
 /**
@@ -100,6 +103,7 @@ function withGuideDefaults(g: Partial<InterviewGuide> | null | undefined): Inter
     closing_message:
       g?.closing_message ?? "Thank you for your time. This concludes our interview.",
     allow_follow_ups: g?.allow_follow_ups ?? true,
+    skip_answered_questions: g?.skip_answered_questions ?? (g?.allow_follow_ups ?? true),
     probe_selection: g?.probe_selection === "relevance" ? "relevance" : "ordered",
     allow_emergent_follow_ups: g?.allow_emergent_follow_ups ?? false,
   };
@@ -151,6 +155,7 @@ function generateGuideJSONTemplate(): string {
     ],
     closing_message: "Thank you for your time. This concludes our interview.",
     allow_follow_ups: true,
+    skip_answered_questions: true,
     probe_selection: "ordered",
     allow_emergent_follow_ups: false,
   };
@@ -237,6 +242,7 @@ function parseGuideCSV(content: string): InterviewGuide {
     questions,
     closing_message: closingMessage,
     allow_follow_ups: true,
+    skip_answered_questions: true,
     probe_selection: "ordered",
     allow_emergent_follow_ups: false,
   };
@@ -274,6 +280,7 @@ function parseGuideJSON(content: string): InterviewGuide {
         do_not_assume: Array.isArray(q.do_not_assume) ? q.do_not_assume.filter((item): item is string => typeof item === "string") : [],
         priority: q.priority === "optional" ? "optional" : "required",
         sensitivity: q.sensitivity === "elevated" ? "elevated" : "standard",
+        always_ask: q.always_ask === true,
       };
     }
   );
@@ -285,6 +292,7 @@ function parseGuideJSON(content: string): InterviewGuide {
         ? obj.closing_message
         : "Thank you for your time. This concludes our interview.",
     allow_follow_ups: obj.allow_follow_ups !== false,
+    skip_answered_questions: typeof obj.skip_answered_questions === "boolean" ? obj.skip_answered_questions : obj.allow_follow_ups !== false,
     probe_selection: obj.probe_selection === "relevance" ? "relevance" : "ordered",
     allow_emergent_follow_ups: obj.allow_emergent_follow_ups === true,
   };
@@ -556,6 +564,7 @@ Important: Adapt your style to the communication channel. For voice interviews, 
     questions: [],
     closing_message: "Thank you for your time. This concludes our interview.",
     allow_follow_ups: true,
+    skip_answered_questions: true,
     probe_selection: "ordered",
     allow_emergent_follow_ups: false,
   },
@@ -1629,6 +1638,25 @@ export default function AgentFormPage() {
                 </span>
               </label>
 
+              <label className="flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={form.interview_guide.skip_answered_questions}
+                  onChange={(e) => setForm((f) => ({
+                    ...f,
+                    interview_guide: {
+                      ...f.interview_guide,
+                      skip_answered_questions: e.target.checked,
+                    },
+                  }))}
+                />
+                <span>
+                  <span className="block text-xs font-medium text-gray-800">Skip questions already answered</span>
+                  <span className="block text-[11px] text-gray-500 mt-0.5 leading-relaxed">Independent of exploratory follow-ups. Only fully covered cards may be skipped; protect task or module anchors per question.</span>
+                </span>
+              </label>
+
               {/* ── Probe selection (ordered vs relevance) ── */}
               {form.interview_guide.allow_follow_ups && <div>
                 <div className="flex items-center gap-2 mb-2">
@@ -1856,6 +1884,20 @@ export default function AgentFormPage() {
                       placeholder="e.g. Can you tell me about your experience with…?"
                     />
                   </div>
+
+                  {form.interview_guide.skip_answered_questions && <label className="flex items-start gap-2 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={q.always_ask}
+                      onChange={(e) => setForm((f) => {
+                        const qs = [...f.interview_guide.questions];
+                        qs[qi] = { ...qs[qi], always_ask: e.target.checked };
+                        return { ...f, interview_guide: { ...f.interview_guide, questions: qs } };
+                      })}
+                    />
+                    <span><span className="font-medium text-gray-700">Always ask this question</span><span className="block text-[11px] text-gray-500">Protect a task or module anchor from evidence-based skipping.</span></span>
+                  </label>}
 
                   {/* Probes */}
                   {form.interview_guide.allow_follow_ups && <div>

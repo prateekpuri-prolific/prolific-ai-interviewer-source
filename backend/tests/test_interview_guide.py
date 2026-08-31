@@ -163,6 +163,33 @@ class TestBuildStructuredPrompt:
         assert '"action":"main|clarify|close"' in out
         assert "Never use `probe`" in out
 
+    def test_evidence_skipping_is_independent_from_follow_ups(self):
+        guide = {
+            "allow_follow_ups": False,
+            "skip_answered_questions": True,
+            "questions": [
+                {
+                    "id": "task",
+                    "text": "What task did you try?",
+                    "evidence_goal": ["One concrete task"],
+                    "always_ask": True,
+                },
+                {
+                    "id": "inputs",
+                    "text": "What inputs did you provide?",
+                    "evidence_goal": ["Inputs supplied"],
+                },
+            ],
+        }
+
+        out = build_structured_prompt("Hi.", guide, emit_progress=True)
+
+        assert "EVIDENCE-AWARE FIXED SURVEY OVERRIDE" in out
+        assert "protected; always ask" in out
+        assert "EVERY one of its evidence items is `covered`" in out
+        assert '"action":"main|probe|clarify|close"' in out
+        assert "permission for exploratory" in out
+
     def test_closing_waits_for_final_answer(self, two_question_guide):
         out = build_structured_prompt("Hi.", two_question_guide)
         assert "the participant has given\ntheir final answer" in out
@@ -1173,6 +1200,122 @@ class TestTextStructuredController:
         assert message is not None
         assert "question 2" in message["content"]
         assert c.current_question_index == 1
+
+    @staticmethod
+    def _evidence_skip_guide() -> dict:
+        return {
+            "allow_follow_ups": False,
+            "skip_answered_questions": True,
+            "questions": [
+                {
+                    "id": "recent_task",
+                    "text": "What recent task did you try?",
+                    "evidence_goal": ["One concrete recent task"],
+                    "always_ask": True,
+                },
+                {
+                    "id": "future_task",
+                    "text": "What other task would you want AI to handle?",
+                    "evidence_goal": ["One desired future task"],
+                    "always_ask": True,
+                },
+                {
+                    "id": "workflow",
+                    "text": "How do you complete that task today?",
+                    "evidence_goal": ["Current workflow", "Manual effort"],
+                },
+            ],
+            "closing_message": "Done.",
+        }
+
+    def test_evidence_skip_protects_task_anchor(self):
+        c = TextStructuredController(self._evidence_skip_guide())
+        c.review_turn(
+            "What recent task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="recent_task:main"),
+        )
+        c.register_bot_turn("Ready.")
+        c.maybe_advance_message("I also want AI to coordinate vendor reviews.")
+
+        review = c.review_turn(
+            "How do you complete that task today?",
+            3,
+            TurnDecision(
+                action="main",
+                question=3,
+                intent="workflow:main",
+                resolved={"future_task:e1": "covered"},
+                focal_entity="vendor_risk_review",
+            ),
+            "I also want AI to coordinate vendor reviews.",
+        )
+
+        assert review.replaced is True
+        assert review.question_index == 1
+        assert review.text == "What other task would you want AI to handle?"
+
+    def test_evidence_skip_names_task_after_skipped_card(self):
+        guide = self._evidence_skip_guide()
+        guide["questions"][1]["always_ask"] = False
+        c = TextStructuredController(guide)
+        c.review_turn(
+            "What recent task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="recent_task:main"),
+        )
+        c.register_bot_turn("Ready.")
+        c.maybe_advance_message("I want AI to coordinate vendor reviews.")
+
+        review = c.review_turn(
+            "How do you complete that task today?",
+            3,
+            TurnDecision(
+                action="main",
+                question=3,
+                intent="workflow:main",
+                resolved={"future_task:e1": "covered"},
+                focal_entity="vendor_risk_review",
+            ),
+            "I want AI to coordinate vendor reviews.",
+        )
+
+        assert review.replaced is True
+        assert review.reason == "task_context_after_skip"
+        assert review.text.startswith("Thinking about the vendor risk review,")
+
+    def test_fixed_skip_allows_one_partial_evidence_repair(self):
+        c = TextStructuredController(self._evidence_skip_guide())
+        c.review_turn(
+            "What recent task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="recent_task:main"),
+        )
+        c.register_bot_turn("Ready.")
+        c.maybe_advance_message("I want AI to coordinate vendor reviews.")
+        c.review_turn(
+            "What other task would you want AI to handle?",
+            2,
+            TurnDecision(action="main", question=2, intent="future_task:main"),
+        )
+        c.register_bot_turn("I want AI to coordinate vendor reviews.")
+        c.maybe_advance_message("I still do it manually.")
+
+        review = c.review_turn(
+            "What part still requires manual work?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=3,
+                intent="workflow:emergent:clarification",
+                resolved={"workflow:e1": "partial"},
+            ),
+            "I still do it manually.",
+        )
+
+        assert review.replaced is False
+        assert review.decision is not None
+        assert review.decision.action == "probe"
 
     def test_none_skips_remaining_dependent_module_questions(self):
         guide = {
