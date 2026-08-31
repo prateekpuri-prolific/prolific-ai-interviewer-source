@@ -105,6 +105,7 @@ if ! gcloud sql instances describe "$SQL_INSTANCE" --project "$GCP_PROJECT" >/de
   gcloud sql instances create "$SQL_INSTANCE" \
     --project "$GCP_PROJECT" \
     --database-version=POSTGRES_16 \
+    --edition=enterprise \
     --region="$GCP_REGION" \
     --tier=db-g1-small \
     --storage-type=SSD \
