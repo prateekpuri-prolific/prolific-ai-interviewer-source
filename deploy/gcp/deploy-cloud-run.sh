@@ -41,9 +41,9 @@ done
 
 if [[ "$BUILD_METHOD" == "local" ]]; then
   gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
-  docker build --tag "$BACKEND_IMAGE" "$ROOT_DIR/backend"
+  docker build --platform linux/amd64 --tag "$BACKEND_IMAGE" "$ROOT_DIR/backend"
   docker push "$BACKEND_IMAGE"
-  docker build --tag "$FRONTEND_IMAGE" "$ROOT_DIR/frontend"
+  docker build --platform linux/amd64 --tag "$FRONTEND_IMAGE" "$ROOT_DIR/frontend"
   docker push "$FRONTEND_IMAGE"
 elif [[ "$BUILD_METHOD" == "cloud-build" ]]; then
   gcloud builds submit "$ROOT_DIR/backend" \
