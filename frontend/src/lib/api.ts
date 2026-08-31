@@ -203,6 +203,7 @@ export interface InterviewQuestionConfig {
   sensitivity?: "standard" | "elevated";
   phase?: "warm_up" | "core" | "closing";
   visit_scope?: "all" | "first_time" | "returning";
+  skip_remaining_module_if_not_applicable?: boolean;
   role_variants?: Record<string, string | { text?: string; probes?: string[] }>;
   returning_role_variants?: Record<string, string | { text?: string; probes?: string[] }>;
 }

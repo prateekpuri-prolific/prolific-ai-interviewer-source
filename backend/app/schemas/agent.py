@@ -47,6 +47,13 @@ class InterviewQuestion(BaseModel):
         "all",
         description="Whether this question is used for all, first-time, or returning participants.",
     )
+    skip_remaining_module_if_not_applicable: bool = Field(
+        False,
+        description=(
+            "When true, an explicit none/not-applicable response skips the "
+            "remaining consecutive questions in this question's module."
+        ),
+    )
     role_variants: dict[str, str | dict] = Field(
         default_factory=dict,
         description=(

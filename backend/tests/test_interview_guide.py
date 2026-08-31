@@ -32,6 +32,7 @@ from app.pipeline.interview_guide import (
     TurnDecision,
     build_structured_prompt,
     classify_participant_turn,
+    conditional_module_skip_index,
     control_marker_prefix,
     resolve_role_guide,
     enforce_one_question_per_turn,
@@ -1172,6 +1173,72 @@ class TestTextStructuredController:
         assert message is not None
         assert "question 2" in message["content"]
         assert c.current_question_index == 1
+
+    def test_none_skips_remaining_dependent_module_questions(self):
+        guide = {
+            "allow_follow_ups": False,
+            "questions": [
+                {
+                    "id": "unmet_task",
+                    "module": "Future unmet task",
+                    "text": "What other task would you want AI to do?",
+                    "skip_remaining_module_if_not_applicable": True,
+                },
+                {
+                    "id": "inputs",
+                    "module": "Future unmet task",
+                    "text": "What inputs would it need?",
+                },
+                {
+                    "id": "outputs",
+                    "module": "Future unmet task",
+                    "text": "What output would be useful?",
+                },
+            ],
+            "closing_message": "That completes the interview. Thank you.",
+        }
+        c = TextStructuredController(guide)
+        c.register_bot_turn("Ready.")
+
+        message = c.maybe_advance_message("I'm drawing a blank on another task.")
+        assert message is not None
+        assert "question 2" in message["content"]
+
+        review = c.review_turn(
+            "What inputs would it need?",
+            2,
+            TurnDecision(
+                action="main",
+                question=2,
+                intent="inputs:main",
+                not_applicable_question=1,
+            ),
+            "I'm drawing a blank on another task.",
+        )
+
+        assert review.closed is True
+        assert review.text == "That completes the interview. Thank you."
+        assert review.reason == "module_not_applicable"
+        assert c.current_question_index == 3
+        assert c.is_finished is True
+
+    def test_conditional_skip_stops_at_the_next_module(self):
+        questions = [
+            {
+                "module": "Dependent details",
+                "skip_remaining_module_if_not_applicable": True,
+            },
+            {"module": "Dependent details"},
+            {"module": "Closing reflection"},
+        ]
+
+        decision = TurnDecision(
+            action="main", question=2, not_applicable_question=1
+        )
+        assert conditional_module_skip_index(questions, decision, 1) == (0, 2)
+        assert conditional_module_skip_index(
+            questions, TurnDecision(action="main", question=2), 1
+        ) is None
 
     def test_disabled_follow_ups_replace_model_probe(self, two_question_guide):
         guide = {**two_question_guide, "allow_follow_ups": False}

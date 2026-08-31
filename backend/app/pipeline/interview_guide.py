@@ -586,6 +586,7 @@ _TERMINAL_STATUS_PATTERNS = {
         re.IGNORECASE,
     ),
     "not_applicable": re.compile(
+        r"^\s*(?:none|nothing|nope|no)\s*[.!]?\s*$|"
         r"\b(not applicable|doesn'?t apply|does not apply|never (?:used|tried|had)|"
         r"haven'?t (?:used|tried|had)|have not (?:used|tried|had)|"
         r"don'?t use|do not use|nothing to compare|no comparison|"
@@ -600,6 +601,40 @@ _TERMINAL_STATUS_PATTERNS = {
 }
 
 
+def conditional_module_skip_index(
+    questions: list[dict],
+    decision: Optional["TurnDecision"],
+    current_index: int,
+) -> Optional[tuple[int, int]]:
+    """Validate an LLM applicability decision against the authored guide.
+
+    Returns ``(answered_index, next_index)`` only when the model identified an
+    opt-in question as not applicable. The server, not the model, owns the
+    scope of the skip: only consecutive cards sharing that module are skipped.
+    """
+    if decision is None or decision.not_applicable_question is None:
+        return None
+    answered_index = decision.not_applicable_question - 1
+    if not (0 <= answered_index < len(questions)):
+        return None
+    if answered_index not in {current_index, current_index - 1}:
+        return None
+    question = questions[answered_index]
+    if not question.get("skip_remaining_module_if_not_applicable"):
+        return None
+    module = str(question.get("module") or "").strip()
+    if not module:
+        return None
+
+    next_index = answered_index + 1
+    while next_index < len(questions):
+        next_module = str(questions[next_index].get("module") or "").strip()
+        if next_module != module:
+            break
+        next_index += 1
+    return answered_index, next_index
+
+
 @dataclass(frozen=True)
 class TurnDecision:
     """Hidden, model-authored account of the evidence state for one turn."""
@@ -610,6 +645,7 @@ class TurnDecision:
     resolved: dict[str, str] = field(default_factory=dict)
     focal_entity: Optional[str] = None
     provenance: Optional[str] = None
+    not_applicable_question: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -699,6 +735,14 @@ def parse_turn_decision(payload: str) -> Optional[TurnDecision]:
         provenance = str(provenance).strip().lower()
         if provenance not in _PROVENANCE_VALUES:
             provenance = None
+    not_applicable_question = raw.get("not_applicable_question")
+    if not_applicable_question is not None:
+        try:
+            not_applicable_question = int(not_applicable_question)
+        except (TypeError, ValueError):
+            return None
+        if not_applicable_question < 1:
+            return None
     return TurnDecision(
         action=action,
         question=question,
@@ -706,6 +750,7 @@ def parse_turn_decision(payload: str) -> Optional[TurnDecision]:
         resolved=resolved,
         focal_entity=focal_entity,
         provenance=provenance,
+        not_applicable_question=not_applicable_question,
     )
 
 
@@ -750,6 +795,8 @@ def format_turn_marker(decision: TurnDecision) -> str:
         payload["focal_entity"] = decision.focal_entity
     if decision.provenance:
         payload["provenance"] = decision.provenance
+    if decision.not_applicable_question is not None:
+        payload["not_applicable_question"] = decision.not_applicable_question
     return "[[TURN " + json.dumps(payload, separators=(",", ":")) + "]]"
 
 
@@ -788,6 +835,24 @@ def turn_decision_instruction(
     questions: list[dict], allow_follow_ups: bool = True
 ) -> str:
     """Prompt fragment for same-call evidence state, hidden from participants."""
+    conditional_questions = [
+        index + 1
+        for index, question in enumerate(questions)
+        if question.get("skip_remaining_module_if_not_applicable")
+    ]
+    applicability_rule = (
+        "The optional `not_applicable_question` field classifies the "
+        "participant's latest answer. Set it to one of these question numbers "
+        f"only: {conditional_questions}. Set it when the participant "
+        "semantically indicates that no applicable example, task, or answer "
+        "exists for the question they just answered. Understand natural "
+        "paraphrases; do not require a literal word such as `none`. Otherwise "
+        "set it to null. Never set it for an unasked question. The server "
+        "validates this field and controls the scope of any skip."
+        if conditional_questions
+        else "Always set `not_applicable_question` to null; conditional module "
+        "skipping is not enabled for any question in this guide."
+    )
     if not allow_follow_ups:
         catalog = "\n".join(
             f"- Question {index + 1} main intent: "
@@ -799,7 +864,7 @@ def turn_decision_instruction(
 ### Turn decision marker (hidden, required on EVERY response)
 Before the visible words of every response, emit exactly one compact JSON
 marker on one line:
-[[TURN {{"action":"main|clarify|close","question":2,"intent":"a main intent ID below or null","resolved":{{}},"focal_entity":null,"provenance":"unknown"}}]]
+[[TURN {{"action":"main|clarify|close","question":2,"intent":"a main intent ID below or null","resolved":{{}},"focal_entity":null,"provenance":"unknown","not_applicable_question":null}}]]
 
 This marker is private control data and is automatically removed. Use
 `action="main"` only for the next predefined main question, in guide order.
@@ -808,6 +873,8 @@ question, then resume the pending predefined main question. Never use `probe`
 or `thread`, never generate a new content question, and never skip a main
 question because its topic appeared in an earlier answer. Use `close` only
 after the participant answers the final predefined question.
+
+{applicability_rule}
 
 Allowed main intent IDs:
 {catalog}
@@ -832,11 +899,13 @@ Allowed main intent IDs:
 ### Turn decision marker (hidden, required on EVERY response)
 Before the visible words of every response, emit exactly one compact JSON
 marker on one line:
-[[TURN {{"action":"main|probe|thread|clarify|close","question":2,"intent":"an ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"focal_entity":"optional non-identifying label","provenance":"direct|second_hand|opinion|mixed|unknown"}}]]
+[[TURN {{"action":"main|probe|thread|clarify|close","question":2,"intent":"an ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"focal_entity":"optional non-identifying label","provenance":"direct|second_hand|opinion|mixed|unknown","not_applicable_question":null}}]]
 
 This marker is private control data and is automatically removed before the
 participant sees or hears the response. Put nothing before it, never mention
 it, and do not wrap it in Markdown. Use strict JSON with double quotes.
+
+{applicability_rule}
 
 Decision rules:
 - `question` is the 1-based guide question your visible response belongs to.
@@ -1089,6 +1158,12 @@ def build_structured_prompt(
         guide_lines.append(f"Main intent ID: {intents['main']}")
         if q.get("module"):
             guide_lines.append(f"Module: {q['module']}")
+        if q.get("skip_remaining_module_if_not_applicable"):
+            guide_lines.append(
+                "Applicability rule: if the participant explicitly answers "
+                "none or says this does not apply, skip the remaining "
+                "consecutive questions in this module."
+            )
         guide_lines.append(f"Interview phase: {q.get('phase', 'core')}")
         if q.get("purpose"):
             guide_lines.append(
@@ -1899,6 +1974,16 @@ class EvidenceStateTracker:
         current_index: int,
         participant_text: str = "",
     ) -> TurnReview:
+        conditional_skip = conditional_module_skip_index(
+            self._questions, decision, current_index
+        )
+        if conditional_skip is not None:
+            answered_index, skip_to = conditional_skip
+            for index in range(answered_index, skip_to):
+                for evidence_id in self._catalog[index]["evidence"]:
+                    self._resolutions[evidence_id] = "not_applicable"
+            return self._replacement(skip_to, "module_not_applicable")
+
         if decision is None:
             self._missing_decisions += 1
             participant_words = len((participant_text or "").split())
@@ -2531,6 +2616,20 @@ class InterviewGuideProcessor(FrameProcessor):
         if not participant_text:
             participant_text = " ".join(self._user_buffer)
         if not self._allow_follow_ups:
+            if decision is not None and decision.not_applicable_question is not None:
+                conditional_review = self._evidence.review(
+                    text,
+                    marker,
+                    decision,
+                    self.current_question_index,
+                    participant_text,
+                )
+                if conditional_review.reason == "module_not_applicable":
+                    if conditional_review.closed:
+                        self._closed = True
+                    elif conditional_review.question_index is not None:
+                        self.sync_to_marker(conditional_review.question_index + 1)
+                    return conditional_review
             if self._closed or not self._questions:
                 return TurnReview(
                     text=self._closing,
@@ -2929,6 +3028,22 @@ class TextStructuredController:
     ) -> TurnReview:
         """Validate the model's proposed turn and replace semantic repeats."""
         if not self._allow_follow_ups:
+            if decision is not None and decision.not_applicable_question is not None:
+                conditional_review = self._evidence.review(
+                    text,
+                    marker,
+                    decision,
+                    self.current_question_index,
+                    participant_text,
+                )
+                if conditional_review.reason == "module_not_applicable":
+                    if conditional_review.closed:
+                        self._closed = True
+                        self.current_question_index = len(self._questions)
+                    elif conditional_review.question_index is not None:
+                        self.current_question_index = conditional_review.question_index
+                        self._last_question_text = conditional_review.text
+                    return conditional_review
             if self._closed or not self._questions:
                 self.current_question_index = len(self._questions)
                 return TurnReview(
