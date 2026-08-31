@@ -829,9 +829,14 @@ export default function InterviewPage() {
               setAgentTyping(false);
               break;
             case "finalized": {
-              const inactive = ["participant_inactive", "disconnected", "cancelled"].includes(msg.reason);
+              const incomplete = [
+                "participant_finished",
+                "participant_inactive",
+                "disconnected",
+                "cancelled",
+              ].includes(msg.reason);
               const target = safeHandoffUrl(
-                inactive
+                incomplete
                   ? config?.fielding?.inactivity_url
                   : config?.fielding?.completion_url,
               );
@@ -1757,7 +1762,9 @@ export default function InterviewPage() {
           <section role="dialog" aria-modal="true" aria-labelledby="finish-interview-title" className="w-full max-w-md rounded-3xl border border-gray-200 bg-white p-6 shadow-2xl sm:p-7">
             <h2 id="finish-interview-title" className="text-xl font-semibold tracking-tight text-gray-950">Finish this interview?</h2>
             <p className="mt-3 text-sm leading-relaxed text-gray-600">
-              Your responses so far will be submitted. You can finish before the suggested time, and any answer you are currently recording will be transcribed and included.
+              {config?.fielding?.inactivity_url
+                ? "Your responses so far will be saved as an incomplete interview. You’ll return to Prolific, where the submission will be marked for return and prorated payment under the study policy. Any answer you are currently recording will be transcribed and included."
+                : "Your responses so far will be submitted. You can finish before the suggested time, and any answer you are currently recording will be transcribed and included."}
             </p>
             <div className="mt-6 flex justify-end gap-3">
               <button type="button" onClick={() => setFinishDialogOpen(false)} className="rounded-xl px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-100">Keep going</button>

@@ -1284,6 +1284,37 @@ class TestTextStructuredController:
         assert review.reason == "task_context_after_skip"
         assert review.text.startswith("Thinking about the vendor risk review,")
 
+    def test_evidence_skip_does_not_prefix_self_contained_anchor(self):
+        guide = self._evidence_skip_guide()
+        guide["questions"][1]["always_ask"] = False
+        guide["questions"][2]["text"] = (
+            "Thinking back six months, what work task feels easier now?"
+        )
+        c = TextStructuredController(guide)
+        c.review_turn(
+            "What recent task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="recent_task:main"),
+        )
+        c.register_bot_turn("Ready.")
+        c.maybe_advance_message("I want AI to coordinate vendor reviews.")
+
+        review = c.review_turn(
+            "Thinking back six months, what work task feels easier now?",
+            3,
+            TurnDecision(
+                action="main",
+                question=3,
+                intent="workflow:main",
+                resolved={"future_task:e1": "covered"},
+                focal_entity="vendor_risk_review",
+            ),
+            "I want AI to coordinate vendor reviews.",
+        )
+
+        assert review.replaced is False
+        assert review.text == "Thinking back six months, what work task feels easier now?"
+
     def test_fixed_skip_allows_one_partial_evidence_repair(self):
         c = TextStructuredController(self._evidence_skip_guide())
         c.review_turn(

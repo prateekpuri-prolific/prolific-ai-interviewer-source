@@ -2077,6 +2077,17 @@ class EvidenceStateTracker:
 
     def _contextual_question_text(self, index: int, text: str) -> str:
         """Keep pronouns unambiguous after one or more evidence-based skips."""
+        # Self-contained anchors such as "Thinking back about six months..."
+        # do not need the prior task pasted onto them. Doing that creates
+        # stilted transitions ("Thinking about X, thinking back..."). Only add
+        # context when the destination wording actually points backward.
+        if not re.search(
+            r"\b(?:that|this|the same)\s+"
+            r"(?:task|work|output|result|experience|example|tool|process|workflow)\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return text
         label = re.sub(r"[^a-zA-Z0-9 _-]", "", self._latest_focal_entity or "")
         label = re.sub(r"[_-]+", " ", label).strip()
         if not label or len(label.split()) > 10 or not text:
