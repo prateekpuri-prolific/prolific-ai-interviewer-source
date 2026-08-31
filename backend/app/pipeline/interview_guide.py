@@ -403,7 +403,38 @@ def participant_interruption_response(
         ]
         estimated = info.get("estimated_minutes")
 
-        if any(term in lowered for term in ("retention", "how long keep", "how long store")):
+        asks_retention = bool(
+            re.search(
+                r"\b(?:retention|how long\b.{0,50}\b(?:keep|kept|store|stored|"
+                r"retain|retained|save|saved)|when\b.{0,40}\b(?:delete|deleted))\b",
+                lowered,
+            )
+        )
+        asks_recipients = bool(
+            re.search(
+                r"\b(?:who\b.{0,35}\b(?:receive|receives|get|gets|see|sees|"
+                r"read|reads|review|reviews|access|share|shared)|who receives|"
+                r"who gets|third[- ]part(?:y|ies)|processor)\b",
+                lowered,
+            )
+        )
+
+        # A participant may ask for more than one privacy fact in the same
+        # interruption (for example, who can see a transcript *and* how long
+        # it is kept).  The consent page already exposes each approved fact,
+        # so answer every requested facet instead of letting the first broad
+        # data-handling match hide the rest.
+        if asks_retention and asks_recipients:
+            details = []
+            for value in (data_recipients, retention):
+                if value and value not in details:
+                    details.append(value)
+            answer = " ".join(details) or data_summary or (
+                "I don't have enough information here to state who receives "
+                "the data or how long it is retained."
+            )
+
+        elif asks_retention:
             answer = retention or data_summary or (
                 "I don't have enough information here to state the study's retention period."
             )
@@ -440,7 +471,7 @@ def participant_interruption_response(
             answer = data_controller or (
                 "I don't have the data-controller identity available here."
             )
-        elif any(term in lowered for term in ("who receives", "who gets", "third party", "third-party", "processor")):
+        elif asks_recipients:
             answer = data_recipients or data_summary or (
                 "I don't have enough information here to state who receives the data."
             )

@@ -761,6 +761,25 @@ class TestParticipantTurnControl:
         assert "What was at stake" not in response
         assert response.endswith("you'd like to ask first?")
 
+    def test_combined_recipient_and_retention_question_answers_both(self):
+        response = participant_interruption_response(
+            "Who will be able to see my answers and how long will the transcript be kept?",
+            {
+                "data_handling_summary": "Audio is not saved.",
+                "data_recipients_summary": (
+                    "Authorized researchers and the study's service providers."
+                ),
+                "data_retention_period": (
+                    "Pseudonymized transcripts are retained for 12 months."
+                ),
+            },
+            "Are you ready to begin?",
+        )
+        assert "Authorized researchers" in response
+        assert "12 months" in response
+        assert "Are you ready to begin?" not in response
+        assert response.endswith("you'd like to ask first?")
+
     def test_protected_wording_uses_data_handling_facts(self):
         response = participant_interruption_response(
             "Before I continue, is this gonna be privately protected?",
