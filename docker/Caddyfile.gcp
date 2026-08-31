@@ -1,0 +1,29 @@
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+		-Server
+	}
+
+	# API, transcription, speech, and authenticated researcher traffic.
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Interview WebSockets can stay open for the full study duration.
+	handle /ws/* {
+		reverse_proxy backend:8000 {
+			transport http {
+				keepalive 30s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
+}

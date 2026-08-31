@@ -1,0 +1,102 @@
+name: oasis
+
+# Production-pilot topology for Google Cloud:
+#   internet -> Caddy -> frontend/backend
+#   backend -> Cloud SQL Auth Proxy -> managed PostgreSQL
+#   backend -> local Redis (ephemeral coordination only)
+services:
+  caddy:
+    image: caddy:2.9-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env.production}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile.gcp:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+    networks:
+      - oasis_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: oasis-frontend:production
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - oasis_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: oasis-backend:production
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - ${OASIS_ENV_FILE:-.env.production}
+    depends_on:
+      cloud-sql-proxy:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import json,urllib.request;
+          assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3))['healthy']"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 90s
+    networks:
+      - oasis_net
+
+  cloud-sql-proxy:
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.14.2
+    restart: unless-stopped
+    command:
+      - "--address=0.0.0.0"
+      - "--port=5432"
+      - "${CLOUD_SQL_INSTANCE:?Set CLOUD_SQL_INSTANCE in .env.production}"
+    expose:
+      - "5432"
+    networks:
+      - oasis_net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    expose:
+      - "6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - oasis_net
+
+volumes:
+  redisdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  oasis_net:
+    driver: bridge

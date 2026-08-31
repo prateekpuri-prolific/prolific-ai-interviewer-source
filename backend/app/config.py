@@ -1,0 +1,151 @@
+"""
+OASIS — Application configuration.
+
+All settings are loaded from environment variables (or .env file).
+"""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # ── Application ──
+    app_name: str = "OASIS"
+    app_env: str = "development"
+    secret_key: str = "change-me-to-a-random-secret-key"
+    debug: bool = True
+    # AGPL deployments should point participants to the complete corresponding
+    # source for the version running on the network.
+    source_code_url: str = ""
+
+    # ── PostgreSQL ──
+    postgres_user: str = "oasis"
+    postgres_password: str = "change-me"
+    postgres_db: str = "oasis"
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    # These limits are per Uvicorn worker.  The conservative defaults keep a
+    # two-worker pilot below the connection ceiling of small managed Postgres
+    # instances while still allowing interview turns to proceed in parallel.
+    database_pool_size: int = 5
+    database_max_overflow: int = 5
+    database_pool_timeout_seconds: int = 30
+
+    @property
+    def database_url(self) -> str:
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @property
+    def database_url_sync(self) -> str:
+        """Synchronous URL for Alembic migrations."""
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    # ── Redis ──
+    redis_url: str = "redis://redis:6379/0"
+
+    # ── AI Providers ──
+    openai_api_key: str = ""
+    deepgram_api_key: str = ""
+    elevenlabs_api_key: str = ""
+    cartesia_api_key: str = ""
+
+    # ── OpenAI data-residency (EU regional API) ──
+    # When OPENAI_USE_EU=true, all calls to OpenAI (chat, realtime, STT, TTS,
+    # embeddings) are routed through https://eu.api.openai.com instead of the
+    # default api.openai.com. Requires that the OpenAI project the API key
+    # belongs to has data-residency enabled and a Modified Abuse Monitoring or
+    # Zero Data Retention amendment in place. See
+    # https://developers.openai.com/api/docs/guides/your-data
+    openai_use_eu: bool = False
+
+    # ── Scaleway (OpenAI-compatible LLM API) ──
+    # Uses SCALEWAY_SECRET_KEY as the Bearer token (secret part of the API keypair)
+    scaleway_secret_key: str = ""          # maps to SCALEWAY_SECRET_KEY in .env
+    scaleway_project_id: str = ""          # maps to SCALEWAY_PROJECT_ID in .env
+    scaleway_api_url: str = "https://api.scaleway.ai/v1"
+
+    @property
+    def scaleway_api_key(self) -> str:
+        """Return the Scaleway secret key for use as a Bearer token."""
+        return self.scaleway_secret_key
+
+    # ── Google AI (Gemini Live native audio + Gemini text models) ──
+    google_api_key: str = ""               # maps to GOOGLE_API_KEY in .env
+
+    # ── Anthropic (Claude text models) ──
+    anthropic_api_key: str = ""            # maps to ANTHROPIC_API_KEY in .env
+
+    # ── OpenAI-Compatible Custom LLM (LiteLLM proxy, vLLM, etc.) ──
+    # Point at any base URL that speaks the OpenAI Chat Completions protocol.
+    # Used by voice pipelines when llm_model starts with "custom/".
+    openai_compatible_llm_url: str = ""    # e.g. http://my-litellm:4000/v1
+    openai_compatible_llm_api_key: str = ""
+
+    # ── Azure OpenAI (self-hosted) ──
+    azure_openai_api_key: str = ""
+    azure_openai_endpoint: str = ""
+    azure_openai_api_version: str = "2024-08-01-preview"
+
+    # ── GCP Vertex AI (self-hosted) ──
+    gcp_project_id: str = ""
+    gcp_location: str = "us-central1"
+    gcp_api_key: str = ""  # alternative to Application Default Credentials
+
+    # ── Smart-turn detection (remote endpoint) ──
+    # Leave empty to use the bundled on-device model. Set a URL to route
+    # agents configured for "remote" turn detection to an HTTP smart-turn
+    # service (e.g. a self-hosted smart-turn server).
+    smart_turn_remote_url: str = ""     # e.g. http://my-server:8300/predict
+    smart_turn_remote_api_key: str = ""  # optional bearer token
+
+    # ── Self-Hosted STT/TTS (OpenAI-compatible endpoints) ──
+    self_hosted_stt_url: str = ""       # e.g. http://my-server:8000/v1
+    self_hosted_stt_api_key: str = ""   # optional, many local servers ignore this
+    self_hosted_stt_model: str = "whisper-1"
+    self_hosted_tts_url: str = ""       # e.g. http://my-server:8100/v1
+    self_hosted_tts_api_key: str = ""
+    self_hosted_tts_model: str = "tts-1"
+
+    # ── Embeddings (RAG knowledge base) ──
+    # Leave empty to use OpenAI (text-embedding-3-small). Set a URL to use
+    # any OpenAI-compatible embedding server instead (e.g. LocalAI, TEI, vLLM).
+    embedding_api_url: str = ""         # e.g. http://my-server:8200/v1
+    embedding_api_key: str = ""         # falls back to OPENAI_API_KEY if empty
+    embedding_model: str = ""           # falls back to text-embedding-3-small if empty
+
+    # ── Telephony ──
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
+
+    # ── Authentication ──
+    # Set AUTH_ENABLED=true and AUTH_PASSWORD to enable basic auth.
+    # Default is OFF — no login required.
+    auth_enabled: bool = False
+    auth_username: str = "admin"
+    auth_password: str = ""  # Must be set when auth_enabled=true
+
+    # ── Voice interview audio recording (web widget only) ──
+    # Enabled per agent via store_audio. These settings configure where files go.
+    audio_storage_backend: str = "local"  # "local" | "s3"
+    audio_storage_local_path: str = "/data/oasis-recordings"
+    audio_s3_bucket: str = ""
+    audio_s3_prefix: str = "oasis-recordings"
+    audio_s3_region: str = "us-east-1"
+    audio_s3_access_key_id: str = ""
+    audio_s3_secret_access_key: str = ""
+    audio_s3_endpoint_url: str = ""  # optional, for MinIO
+
+
+settings = Settings()

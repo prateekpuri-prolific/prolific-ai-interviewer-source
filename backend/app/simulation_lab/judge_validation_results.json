@@ -1,0 +1,794 @@
+{
+  "study_id": "stage1-anchored-judge-v1",
+  "created_at": "2026-08-27T23:11:59.327808+00:00",
+  "status": "complete",
+  "claim_boundary": "Internal reliability and control sensitivity only; clinical validity requires human calibration.",
+  "design": {
+    "datasets": [
+      "mibot",
+      "annomi"
+    ],
+    "cases_per_dataset": 8,
+    "total_cases": 16,
+    "conditions": [
+      {
+        "id": "gpt41_order_a",
+        "model": "gpt-4.1",
+        "prompt": "full",
+        "order": "a"
+      },
+      {
+        "id": "gpt41_order_b",
+        "model": "gpt-4.1",
+        "prompt": "full",
+        "order": "b"
+      },
+      {
+        "id": "gpt41_prompt_b",
+        "model": "gpt-4.1",
+        "prompt": "concise",
+        "order": "a"
+      },
+      {
+        "id": "mini_order_a",
+        "model": "gpt-4.1-mini",
+        "prompt": "full",
+        "order": "a"
+      }
+    ],
+    "evaluated_arms": [
+      "context_only",
+      "grounded_world_model",
+      "grounded_backstory"
+    ],
+    "rubric_items": [
+      "direct_response",
+      "role_integrity",
+      "natural_communication",
+      "disclosure_calibration",
+      "evidence_grounding",
+      "persona_compatibility",
+      "trajectory_plausibility"
+    ],
+    "rating_scale": [
+      "pass",
+      "fail",
+      "not_applicable"
+    ],
+    "controls": [
+      "real_observed",
+      "persona_dump",
+      "role_leak",
+      "cross_case"
+    ],
+    "pairwise_comparisons": [
+      "context_vs_world",
+      "context_vs_backstory",
+      "real_vs_context",
+      "real_vs_persona_dump",
+      "real_vs_role_leak",
+      "real_vs_cross_case"
+    ]
+  },
+  "control_checks": [
+    {
+      "name": "Role leakage detected",
+      "observed": 0.9688,
+      "threshold": 0.8,
+      "passed": true
+    },
+    {
+      "name": "Persona recitation detected",
+      "observed": 1.0,
+      "threshold": 0.7,
+      "passed": true
+    },
+    {
+      "name": "Overdisclosure detected",
+      "observed": 1.0,
+      "threshold": 0.65,
+      "passed": true
+    },
+    {
+      "name": "Cross-case mismatch detected",
+      "observed": 0.5,
+      "threshold": 0.65,
+      "passed": false
+    },
+    {
+      "name": "Real preferred to role leakage",
+      "observed": 0.8438,
+      "threshold": 0.8,
+      "passed": true
+    },
+    {
+      "name": "Real preferred to persona dump",
+      "observed": 0.8281,
+      "threshold": 0.7,
+      "passed": true
+    },
+    {
+      "name": "Real preferred to cross-case reply",
+      "observed": 0.4844,
+      "threshold": 0.65,
+      "passed": false
+    },
+    {
+      "name": "Candidate-order item agreement",
+      "observed": 0.9133,
+      "threshold": 0.8,
+      "passed": true
+    },
+    {
+      "name": "Candidate-order pairwise agreement",
+      "observed": 0.7396,
+      "threshold": 0.75,
+      "passed": false
+    }
+  ],
+  "checks_passed": 6,
+  "checks_total": 9,
+  "readiness": "not_ready_for_optimization",
+  "red_flags": [
+    {
+      "id": "synthetic_ceiling",
+      "severity": "critical",
+      "finding": "All three genuine synthetic arms received a 100% mean anchored-item pass rate.",
+      "implication": "The item rubric detects caricatured controls but cannot discriminate realistic differences among current systems."
+    },
+    {
+      "id": "human_preference_reversal",
+      "severity": "critical",
+      "finding": "The judge preferred context-only synthetic replies to observed human replies in 84% of ratings.",
+      "implication": "Pairwise realism judgments favor polished synthetic language and cannot be used as the optimization target yet."
+    },
+    {
+      "id": "cross_case_blindness",
+      "severity": "critical",
+      "finding": "Only 50% of cross-conversation controls were flagged as context mismatches.",
+      "implication": "The judge accepts generically plausible replies even when they come from another conversation."
+    },
+    {
+      "id": "pairwise_order_sensitivity",
+      "severity": "warning",
+      "finding": "Pairwise winner agreement under reversed candidate order was 74%.",
+      "implication": "Candidate order can change approximately one quarter of pairwise conclusions."
+    }
+  ],
+  "reliability": {
+    "order_invariance": {
+      "pooled_items": {
+        "agreement": 0.9133,
+        "kappa": 0.8084,
+        "n": 784
+      },
+      "by_item": {
+        "direct_response": {
+          "agreement": 0.9821,
+          "kappa": 0.9615,
+          "n": 112
+        },
+        "role_integrity": {
+          "agreement": 0.9554,
+          "kappa": 0.8896,
+          "n": 112
+        },
+        "natural_communication": {
+          "agreement": 0.9643,
+          "kappa": 0.9169,
+          "n": 112
+        },
+        "disclosure_calibration": {
+          "agreement": 0.9732,
+          "kappa": 0.9441,
+          "n": 112
+        },
+        "evidence_grounding": {
+          "agreement": 0.8839,
+          "kappa": 0.7479,
+          "n": 112
+        },
+        "persona_compatibility": {
+          "agreement": 0.8839,
+          "kappa": 0.7246,
+          "n": 112
+        },
+        "trajectory_plausibility": {
+          "agreement": 0.75,
+          "kappa": 0.4828,
+          "n": 112
+        }
+      },
+      "pairwise_winners": {
+        "agreement": 0.7396,
+        "kappa": 0.6488,
+        "n": 96
+      }
+    },
+    "prompt_robustness": {
+      "pooled_items": {
+        "agreement": 0.9145,
+        "kappa": 0.8112,
+        "n": 784
+      },
+      "by_item": {
+        "direct_response": {
+          "agreement": 0.9821,
+          "kappa": 0.9611,
+          "n": 112
+        },
+        "role_integrity": {
+          "agreement": 0.9107,
+          "kappa": 0.7813,
+          "n": 112
+        },
+        "natural_communication": {
+          "agreement": 0.9732,
+          "kappa": 0.9381,
+          "n": 112
+        },
+        "disclosure_calibration": {
+          "agreement": 0.9643,
+          "kappa": 0.9233,
+          "n": 112
+        },
+        "evidence_grounding": {
+          "agreement": 0.8929,
+          "kappa": 0.7678,
+          "n": 112
+        },
+        "persona_compatibility": {
+          "agreement": 0.875,
+          "kappa": 0.72,
+          "n": 112
+        },
+        "trajectory_plausibility": {
+          "agreement": 0.8036,
+          "kappa": 0.6026,
+          "n": 112
+        }
+      },
+      "pairwise_winners": {
+        "agreement": 0.8542,
+        "kappa": 0.8108,
+        "n": 96
+      }
+    },
+    "cross_model": {
+      "pooled_items": {
+        "agreement": 0.8597,
+        "kappa": 0.6586,
+        "n": 784
+      },
+      "by_item": {
+        "direct_response": {
+          "agreement": 0.9286,
+          "kappa": 0.8492,
+          "n": 112
+        },
+        "role_integrity": {
+          "agreement": 0.9643,
+          "kappa": 0.9125,
+          "n": 112
+        },
+        "natural_communication": {
+          "agreement": 0.9643,
+          "kappa": 0.9181,
+          "n": 112
+        },
+        "disclosure_calibration": {
+          "agreement": 0.875,
+          "kappa": 0.7194,
+          "n": 112
+        },
+        "evidence_grounding": {
+          "agreement": 0.7857,
+          "kappa": 0.4529,
+          "n": 112
+        },
+        "persona_compatibility": {
+          "agreement": 0.7768,
+          "kappa": 0.2795,
+          "n": 112
+        },
+        "trajectory_plausibility": {
+          "agreement": 0.7232,
+          "kappa": 0.2075,
+          "n": 112
+        }
+      },
+      "pairwise_winners": {
+        "agreement": 0.7083,
+        "kappa": 0.6265,
+        "n": 96
+      }
+    }
+  },
+  "candidate_summaries": {
+    "persona_dump": {
+      "direct_response": 0.0,
+      "role_integrity": 0.0781,
+      "natural_communication": 0.0,
+      "disclosure_calibration": 0.0,
+      "evidence_grounding": 0.2188,
+      "persona_compatibility": 0.4219,
+      "trajectory_plausibility": 0.3585,
+      "mean_item_pass_rate": 0.1487,
+      "primary_failures": {
+        "persona_recitation": 59,
+        "overpolished": 1,
+        "role_leakage": 4
+      }
+    },
+    "cross_case": {
+      "direct_response": 0.5,
+      "role_integrity": 0.875,
+      "natural_communication": 0.8438,
+      "disclosure_calibration": 0.5156,
+      "evidence_grounding": 0.5625,
+      "persona_compatibility": 0.5938,
+      "trajectory_plausibility": 0.6349,
+      "mean_item_pass_rate": 0.6465,
+      "primary_failures": {
+        "none": 32,
+        "context_mismatch": 28,
+        "unsupported_fact": 2,
+        "premature_resolution": 2
+      }
+    },
+    "role_leak": {
+      "direct_response": 0.0156,
+      "role_integrity": 0.0312,
+      "natural_communication": 0.0,
+      "disclosure_calibration": 0.1356,
+      "evidence_grounding": 0.2182,
+      "persona_compatibility": 0.2586,
+      "trajectory_plausibility": 0.2642,
+      "mean_item_pass_rate": 0.1247,
+      "primary_failures": {
+        "role_leakage": 56,
+        "overpolished": 1,
+        "context_mismatch": 7
+      }
+    },
+    "grounded_backstory": {
+      "direct_response": 1.0,
+      "role_integrity": 1.0,
+      "natural_communication": 1.0,
+      "disclosure_calibration": 1.0,
+      "evidence_grounding": 1.0,
+      "persona_compatibility": 1.0,
+      "trajectory_plausibility": 1.0,
+      "mean_item_pass_rate": 1.0,
+      "primary_failures": {
+        "none": 64
+      }
+    },
+    "grounded_world_model": {
+      "direct_response": 1.0,
+      "role_integrity": 1.0,
+      "natural_communication": 1.0,
+      "disclosure_calibration": 1.0,
+      "evidence_grounding": 1.0,
+      "persona_compatibility": 1.0,
+      "trajectory_plausibility": 1.0,
+      "mean_item_pass_rate": 1.0,
+      "primary_failures": {
+        "none": 64
+      }
+    },
+    "context_only": {
+      "direct_response": 1.0,
+      "role_integrity": 1.0,
+      "natural_communication": 1.0,
+      "disclosure_calibration": 1.0,
+      "evidence_grounding": 1.0,
+      "persona_compatibility": 1.0,
+      "trajectory_plausibility": 1.0,
+      "mean_item_pass_rate": 1.0,
+      "primary_failures": {
+        "none": 64
+      }
+    },
+    "real_observed": {
+      "direct_response": 0.8906,
+      "role_integrity": 1.0,
+      "natural_communication": 0.9531,
+      "disclosure_calibration": 0.9844,
+      "evidence_grounding": 0.9844,
+      "persona_compatibility": 0.9844,
+      "trajectory_plausibility": 0.9844,
+      "mean_item_pass_rate": 0.9688,
+      "primary_failures": {
+        "none": 57,
+        "context_mismatch": 4,
+        "other": 2,
+        "overpolished": 1
+      }
+    }
+  },
+  "pairwise_summaries": {
+    "context_vs_world": {
+      "left": "context_only",
+      "right": "grounded_world_model",
+      "n": 64,
+      "left_win_rate": 0.2031,
+      "right_win_rate": 0.6562,
+      "tie_rate": 0.1406,
+      "high_confidence_rate": 0.2812
+    },
+    "real_vs_role_leak": {
+      "left": "real_observed",
+      "right": "role_leak",
+      "n": 64,
+      "left_win_rate": 0.8438,
+      "right_win_rate": 0.1562,
+      "tie_rate": 0.0,
+      "high_confidence_rate": 0.9844
+    },
+    "real_vs_cross_case": {
+      "left": "real_observed",
+      "right": "cross_case",
+      "n": 64,
+      "left_win_rate": 0.4844,
+      "right_win_rate": 0.5156,
+      "tie_rate": 0.0,
+      "high_confidence_rate": 0.6094
+    },
+    "context_vs_backstory": {
+      "left": "context_only",
+      "right": "grounded_backstory",
+      "n": 64,
+      "left_win_rate": 0.3125,
+      "right_win_rate": 0.5938,
+      "tie_rate": 0.0938,
+      "high_confidence_rate": 0.3906
+    },
+    "real_vs_context": {
+      "left": "real_observed",
+      "right": "context_only",
+      "n": 64,
+      "left_win_rate": 0.125,
+      "right_win_rate": 0.8438,
+      "tie_rate": 0.0312,
+      "high_confidence_rate": 0.3438
+    },
+    "real_vs_persona_dump": {
+      "left": "real_observed",
+      "right": "persona_dump",
+      "n": 64,
+      "left_win_rate": 0.8281,
+      "right_win_rate": 0.1719,
+      "tie_rate": 0.0,
+      "high_confidence_rate": 1.0
+    }
+  },
+  "population_metrics": {
+    "mibot": {
+      "real_observed": {
+        "response_count": 19,
+        "mean_words": 13.211,
+        "median_words": 13,
+        "sd_words": 9.384,
+        "short_reply_rate": 0.4737,
+        "long_reply_rate": 0.0,
+        "filler_or_neutral_proxy_rate": 0.0,
+        "hedge_rate": 0.3158,
+        "mean_type_token_ratio": 0.9194,
+        "absolutist_terms_per_1000": 0.0,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 100.0,
+        "length_ks_distance": 0.0,
+        "unigram_js_divergence": 0.0
+      },
+      "context_only": {
+        "response_count": 38,
+        "mean_words": 32.211,
+        "median_words": 32.0,
+        "sd_words": 7.541,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.1579,
+        "filler_or_neutral_proxy_rate": 0.1053,
+        "hedge_rate": 0.8684,
+        "mean_type_token_ratio": 0.8928,
+        "absolutist_terms_per_1000": 4.085,
+        "therapy_jargon_per_1000": 1.634,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 41.01,
+        "length_ks_distance": 0.8421,
+        "unigram_js_divergence": 0.4174
+      },
+      "survey_card": {
+        "response_count": 38,
+        "mean_words": 33.526,
+        "median_words": 31.0,
+        "sd_words": 7.749,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.1842,
+        "filler_or_neutral_proxy_rate": 0.1316,
+        "hedge_rate": 0.8684,
+        "mean_type_token_ratio": 0.8954,
+        "absolutist_terms_per_1000": 1.57,
+        "therapy_jargon_per_1000": 0.785,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 39.4,
+        "length_ks_distance": 0.8158,
+        "unigram_js_divergence": 0.4156
+      },
+      "narrative_persona": {
+        "response_count": 38,
+        "mean_words": 35.079,
+        "median_words": 35.0,
+        "sd_words": 7.716,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.2105,
+        "filler_or_neutral_proxy_rate": 0.0526,
+        "hedge_rate": 0.9474,
+        "mean_type_token_ratio": 0.8776,
+        "absolutist_terms_per_1000": 1.5,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 37.66,
+        "length_ks_distance": 0.8421,
+        "unigram_js_divergence": 0.422
+      },
+      "behavioral_profile": {
+        "response_count": 38,
+        "mean_words": 30.684,
+        "median_words": 29.5,
+        "sd_words": 8.64,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.1842,
+        "filler_or_neutral_proxy_rate": 0.1316,
+        "hedge_rate": 0.9211,
+        "mean_type_token_ratio": 0.9101,
+        "absolutist_terms_per_1000": 1.715,
+        "therapy_jargon_per_1000": 0.858,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 43.05,
+        "length_ks_distance": 0.7895,
+        "unigram_js_divergence": 0.4181
+      },
+      "state_aware": {
+        "response_count": 38,
+        "mean_words": 31.947,
+        "median_words": 30.5,
+        "sd_words": 10.102,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.1053,
+        "filler_or_neutral_proxy_rate": 0.0526,
+        "hedge_rate": 0.8684,
+        "mean_type_token_ratio": 0.8933,
+        "absolutist_terms_per_1000": 2.471,
+        "therapy_jargon_per_1000": 0.824,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 41.35,
+        "length_ks_distance": 0.7105,
+        "unigram_js_divergence": 0.4069
+      },
+      "grounded_world_model": {
+        "response_count": 38,
+        "mean_words": 35.421,
+        "median_words": 36.0,
+        "sd_words": 7.471,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.2368,
+        "filler_or_neutral_proxy_rate": 0.1053,
+        "hedge_rate": 0.8684,
+        "mean_type_token_ratio": 0.8851,
+        "absolutist_terms_per_1000": 0.743,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 37.3,
+        "length_ks_distance": 0.8158,
+        "unigram_js_divergence": 0.4201
+      },
+      "grounded_backstory": {
+        "response_count": 38,
+        "mean_words": 33.474,
+        "median_words": 33.0,
+        "sd_words": 6.892,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.1579,
+        "filler_or_neutral_proxy_rate": 0.0526,
+        "hedge_rate": 0.9211,
+        "mean_type_token_ratio": 0.8892,
+        "absolutist_terms_per_1000": 0.786,
+        "therapy_jargon_per_1000": 1.572,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 39.47,
+        "length_ks_distance": 0.8158,
+        "unigram_js_divergence": 0.4132
+      },
+      "retrospective_world_model": {
+        "response_count": 38,
+        "mean_words": 35.026,
+        "median_words": 35.0,
+        "sd_words": 8.172,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.2105,
+        "filler_or_neutral_proxy_rate": 0.1579,
+        "hedge_rate": 0.7105,
+        "mean_type_token_ratio": 0.8933,
+        "absolutist_terms_per_1000": 3.005,
+        "therapy_jargon_per_1000": 1.503,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 37.72,
+        "length_ks_distance": 0.8421,
+        "unigram_js_divergence": 0.4061
+      },
+      "trajectory_status": {
+        "available": false,
+        "reason": "Current synthetic outputs contain one held-out checkpoint per conversation; longitudinal rollouts are required for trajectory comparison."
+      }
+    },
+    "annomi": {
+      "real_observed": {
+        "response_count": 29,
+        "mean_words": 23.31,
+        "median_words": 19,
+        "sd_words": 19.258,
+        "short_reply_rate": 0.2414,
+        "long_reply_rate": 0.1379,
+        "filler_or_neutral_proxy_rate": 0.3448,
+        "hedge_rate": 0.4483,
+        "mean_type_token_ratio": 0.8574,
+        "absolutist_terms_per_1000": 4.438,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 100.0,
+        "length_ks_distance": 0.0,
+        "unigram_js_divergence": 0.0
+      },
+      "context_only": {
+        "response_count": 58,
+        "mean_words": 30.707,
+        "median_words": 29.5,
+        "sd_words": 6.964,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.0862,
+        "filler_or_neutral_proxy_rate": 0.5517,
+        "hedge_rate": 0.9483,
+        "mean_type_token_ratio": 0.8777,
+        "absolutist_terms_per_1000": 7.299,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0172,
+        "length_log_ratio_similarity": 75.91,
+        "length_ks_distance": 0.6379,
+        "unigram_js_divergence": 0.3715
+      },
+      "topic_card": {
+        "response_count": 58,
+        "mean_words": 31.655,
+        "median_words": 30.0,
+        "sd_words": 8.399,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.1379,
+        "filler_or_neutral_proxy_rate": 0.6207,
+        "hedge_rate": 0.8966,
+        "mean_type_token_ratio": 0.8794,
+        "absolutist_terms_per_1000": 5.447,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 73.64,
+        "length_ks_distance": 0.5862,
+        "unigram_js_divergence": 0.3677
+      },
+      "narrative_persona": {
+        "response_count": 58,
+        "mean_words": 35.483,
+        "median_words": 36.5,
+        "sd_words": 7.413,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.2414,
+        "filler_or_neutral_proxy_rate": 0.5345,
+        "hedge_rate": 0.8621,
+        "mean_type_token_ratio": 0.8699,
+        "absolutist_terms_per_1000": 8.746,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 65.69,
+        "length_ks_distance": 0.6552,
+        "unigram_js_divergence": 0.3701
+      },
+      "behavioral_profile": {
+        "response_count": 58,
+        "mean_words": 37.569,
+        "median_words": 36.5,
+        "sd_words": 10.613,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.3793,
+        "filler_or_neutral_proxy_rate": 0.5862,
+        "hedge_rate": 0.9655,
+        "mean_type_token_ratio": 0.8548,
+        "absolutist_terms_per_1000": 5.507,
+        "therapy_jargon_per_1000": 0.459,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 62.05,
+        "length_ks_distance": 0.6552,
+        "unigram_js_divergence": 0.3588
+      },
+      "state_aware": {
+        "response_count": 58,
+        "mean_words": 37.534,
+        "median_words": 37.0,
+        "sd_words": 9.415,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.3448,
+        "filler_or_neutral_proxy_rate": 0.5862,
+        "hedge_rate": 0.9483,
+        "mean_type_token_ratio": 0.8552,
+        "absolutist_terms_per_1000": 5.512,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 62.1,
+        "length_ks_distance": 0.6724,
+        "unigram_js_divergence": 0.3493
+      },
+      "grounded_world_model": {
+        "response_count": 58,
+        "mean_words": 36.259,
+        "median_words": 35.0,
+        "sd_words": 9.062,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.2586,
+        "filler_or_neutral_proxy_rate": 0.5172,
+        "hedge_rate": 0.8966,
+        "mean_type_token_ratio": 0.8724,
+        "absolutist_terms_per_1000": 5.706,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 64.29,
+        "length_ks_distance": 0.6897,
+        "unigram_js_divergence": 0.3444
+      },
+      "grounded_backstory": {
+        "response_count": 58,
+        "mean_words": 35.862,
+        "median_words": 34.0,
+        "sd_words": 9.491,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.2241,
+        "filler_or_neutral_proxy_rate": 0.5517,
+        "hedge_rate": 0.931,
+        "mean_type_token_ratio": 0.8769,
+        "absolutist_terms_per_1000": 7.692,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 65.0,
+        "length_ks_distance": 0.6724,
+        "unigram_js_divergence": 0.3572
+      },
+      "retrospective_world_model": {
+        "response_count": 58,
+        "mean_words": 36.586,
+        "median_words": 34.0,
+        "sd_words": 9.463,
+        "short_reply_rate": 0.0,
+        "long_reply_rate": 0.3103,
+        "filler_or_neutral_proxy_rate": 0.5862,
+        "hedge_rate": 0.8103,
+        "mean_type_token_ratio": 0.8787,
+        "absolutist_terms_per_1000": 6.598,
+        "therapy_jargon_per_1000": 0.0,
+        "premature_resolution_phrase_rate": 0.0,
+        "length_log_ratio_similarity": 63.71,
+        "length_ks_distance": 0.6724,
+        "unigram_js_divergence": 0.3583
+      },
+      "trajectory_status": {
+        "available": false,
+        "reason": "Current synthetic outputs contain one held-out checkpoint per conversation; longitudinal rollouts are required for trajectory comparison."
+      }
+    }
+  },
+  "trajectory_evaluation_available": false,
+  "limitations": [
+    "No clinician or lived-experience ratings are included, so this study cannot establish construct or clinical validity.",
+    "The same provider family generated and judged many candidates; cross-model results measure model strength, not independent clinical agreement.",
+    "The known controls test obvious failures and may overestimate performance on subtle realism errors.",
+    "The judged pilot uses eight cases per corpus; deterministic population diagnostics use every frozen test case.",
+    "One-checkpoint continuations cannot measure longitudinal persona drift or premature recovery trajectories directly."
+  ]
+}

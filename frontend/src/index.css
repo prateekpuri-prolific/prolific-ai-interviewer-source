@@ -1,0 +1,146 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── OASIS Brand Colors (CSS custom properties) ──────────────── */
+:root {
+  --oasis-primary: #0D7377;
+  --oasis-primary-dark: #095B5E;
+  --oasis-primary-light: #E6F5F5;
+  --oasis-gold: #D4A843;
+  --oasis-gold-warm: #F5E6C8;
+  --oasis-charcoal: #1A1A2E;
+  --oasis-slate: #4A4A5A;
+  --oasis-sand: #F0EBE3;
+  --oasis-bg: #FAFAF7;
+  --oasis-success: #2D9F5D;
+  --oasis-error: #C44536;
+}
+
+/* ── Smooth page transitions ────────────────────────────────── */
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--oasis-bg);
+  }
+
+  /* Better focus styles — OASIS teal */
+  *:focus-visible {
+    @apply outline-2 outline-offset-2;
+    outline-color: rgba(13, 115, 119, 0.4);
+  }
+
+  /* Smooth transitions on interactive elements */
+  select,
+  input,
+  textarea,
+  button,
+  a {
+    @apply transition-all duration-200;
+  }
+}
+
+/* ── Custom component styling ──────────────────────────────── */
+@layer components {
+  .select-styled {
+    @apply appearance-none bg-white rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm
+           shadow-sm hover:border-oasis-300
+           focus:border-oasis-500 focus:outline-none focus:ring-2 focus:ring-oasis-500/10
+           transition-all duration-200;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    padding-right: 2.5rem;
+  }
+
+  .input-styled {
+    @apply w-full rounded-xl border border-gray-200 px-3.5 py-2.5 text-sm
+           shadow-sm placeholder:text-gray-400
+           hover:border-oasis-300
+           focus:border-oasis-500 focus:outline-none focus:ring-2 focus:ring-oasis-500/10
+           transition-all duration-200;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-oasis-500 px-5 py-2.5
+           text-sm font-medium text-white shadow-sm
+           hover:bg-oasis-600 hover:shadow-md
+           active:scale-[0.98]
+           disabled:opacity-50 disabled:cursor-not-allowed
+           transition-all duration-200;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-5 py-2.5
+           text-sm font-medium text-gray-700 shadow-sm
+           hover:bg-gray-50 hover:border-gray-300 hover:shadow-md
+           active:scale-[0.98]
+           transition-all duration-200;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-5 py-2.5
+           text-sm font-medium text-red-600 shadow-sm
+           hover:bg-red-50 hover:border-red-300
+           active:scale-[0.98]
+           transition-all duration-200;
+  }
+
+  .card {
+    @apply rounded-2xl border border-gray-200 bg-white shadow-sm
+           hover:shadow-md hover:border-gray-300
+           transition-all duration-300;
+  }
+}
+
+/* ── Voice bars animation (user speaking) ───────────────────── */
+.voice-bar {
+  transform-origin: bottom;
+  animation: voice-bar-bounce var(--bar-speed, 0.6s) ease-in-out infinite;
+  animation-delay: var(--bar-delay, 0s);
+}
+
+@keyframes voice-bar-bounce {
+  0%, 100% { transform: scaleY(0.25); }
+  50% { transform: scaleY(1); }
+}
+
+/* ── Orb ring animation ─────────────────────────────────────── */
+.orb-ring {
+  animation: orb-ring-expand 2.5s ease-out infinite;
+}
+
+@keyframes orb-ring-expand {
+  0% { transform: scale(0.85); opacity: 0.5; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+/* ── Typing indicator dots (chat) ──────────────────────────── */
+.typing-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #0D7377;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* ── Page transition wrapper ────────────────────────────────── */
+.page-enter {
+  animation: page-fade-in 0.3s ease-out;
+}
+
+@keyframes page-fade-in {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}

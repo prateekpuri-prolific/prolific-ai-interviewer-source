@@ -1,0 +1,56 @@
+# Environment
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+
+# Docker
+docker-compose.override.yml
+
+# IDE / AI tools
+.vscode/
+.idea/
+.claude/
+.cursor/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.sqlite3
+pgdata/
+
+# Local interview audio recordings
+data/recordings/
+data/research/
+
+# Redis
+dump.rdb
+GOVERNANCE.md
+
+# Paper draft (private, not for publication in repo yet)
+draft/
