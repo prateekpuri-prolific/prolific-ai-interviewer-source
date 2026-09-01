@@ -24,6 +24,7 @@ type Status = "loading" | "idle" | "input" | "connecting" | "active" | "ended" |
 type EndedReason = "natural" | "user_stopped" | "inactive";
 type ResponseMode = "voice" | "text";
 type RecordingState = "idle" | "recording" | "confirming" | "transcribing";
+type RecordingRecovery = "no_speech" | null;
 type MicCheckStatus = "idle" | "checking" | "ready" | "quiet" | "denied" | "unavailable";
 
 interface ChatMessage {
@@ -148,6 +149,7 @@ export default function InterviewPage() {
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingError, setRecordingError] = useState("");
+  const [recordingRecovery, setRecordingRecovery] = useState<RecordingRecovery>(null);
   const [finishDialogOpen, setFinishDialogOpen] = useState(false);
   const [finishingInterview, setFinishingInterview] = useState(false);
   const [inactivityWarning, setInactivityWarning] = useState(false);
@@ -453,6 +455,7 @@ export default function InterviewPage() {
     setRecordingState("idle");
     setRecordingSeconds(0);
     setRecordingError("");
+    setRecordingRecovery(null);
   }, [releaseTurnMicrophone]);
 
   const showInactivityWarning = useCallback((seconds: number) => {
@@ -738,6 +741,7 @@ export default function InterviewPage() {
     setRecordingState("idle");
     setRecordingSeconds(0);
     setRecordingError("");
+    setRecordingRecovery(null);
     setFinishDialogOpen(false);
     setFinishingInterview(false);
     finishingInterviewRef.current = false;
@@ -934,6 +938,7 @@ export default function InterviewPage() {
     setRecordingState("idle");
     setRecordingSeconds(0);
     setRecordingError("");
+    setRecordingRecovery(null);
     clearInactivityWarning();
     agentTypingRef.current = !finishInterview;
     setAgentTyping(!finishInterview);
@@ -960,6 +965,7 @@ export default function InterviewPage() {
     setRecordingState("idle");
     setRecordingSeconds(0);
     setRecordingError("");
+    setRecordingRecovery(null);
     setChatInput("");
   }, [releaseTurnMicrophone]);
 
@@ -1024,6 +1030,7 @@ export default function InterviewPage() {
       mediaRecorderRef.current?.state === "recording"
     ) return;
     setRecordingError("");
+    setRecordingRecovery(null);
     setChatInput("");
 
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
@@ -1053,6 +1060,7 @@ export default function InterviewPage() {
         releaseTurnMicrophone();
         recordingStateRef.current = "idle";
         setRecordingState("idle");
+        setRecordingRecovery(null);
         setRecordingError("The recording stopped unexpectedly. Please try again or type instead.");
       };
       recorder.onstop = async () => {
@@ -1066,6 +1074,7 @@ export default function InterviewPage() {
             finishAfterCurrentAnswerRef.current = false;
             sendParticipantText("", true);
           } else {
+            setRecordingRecovery(null);
             setRecordingError("We did not capture any audio. Please try again or type instead.");
           }
           return;
@@ -1074,6 +1083,7 @@ export default function InterviewPage() {
         recordingStateRef.current = "transcribing";
         setRecordingState("transcribing");
         recordExperienceEvent("transcription_started");
+        let transcriptionStatus: number | null = null;
         try {
           const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
           const form = new FormData();
@@ -1084,12 +1094,16 @@ export default function InterviewPage() {
             body: form,
           });
           const payload = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(payload.detail || "We could not transcribe that response.");
+          if (!response.ok) {
+            transcriptionStatus = response.status;
+            throw new Error(payload.detail || "We could not transcribe that response.");
+          }
           const transcript = String(payload.text || "").trim();
           if (!transcript) throw new Error("We could not hear a response. Please try again or type instead.");
           recordExperienceEvent("transcription_succeeded", {
             word_count: transcript.split(/\s+/).filter(Boolean).length,
           });
+          setRecordingRecovery(null);
           const shouldFinishInterview = finishAfterCurrentAnswerRef.current;
           finishAfterCurrentAnswerRef.current = false;
           if (!sendParticipantText(transcript, shouldFinishInterview)) {
@@ -1114,7 +1128,13 @@ export default function InterviewPage() {
           }
           recordingStateRef.current = "idle";
           setRecordingState("idle");
-          setRecordingError(error instanceof Error ? error.message : "Voice transcription failed. Please try again.");
+          if (transcriptionStatus === 422) {
+            setRecordingError("");
+            setRecordingRecovery("no_speech");
+          } else {
+            setRecordingRecovery(null);
+            setRecordingError(error instanceof Error ? error.message : "Voice transcription failed. Please try again.");
+          }
         }
       };
 
@@ -1524,7 +1544,39 @@ export default function InterviewPage() {
 
                 {responseMode === "voice" && config?.voice_response_available ? (
                   <div className="rounded-2xl border border-gray-200 bg-white p-3 shadow-[0_18px_55px_rgba(17,24,39,0.12)]">
-                    {recordingState === "idle" && (
+                    {recordingState === "idle" && recordingRecovery === "no_speech" && (
+                      <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left">
+                        <p className="text-sm font-semibold text-amber-950">We didn’t send that answer</p>
+                        <p className="mt-1 text-xs leading-relaxed text-amber-900">The microphone stopped after a pause, but we couldn’t detect any speech. Nothing was sent.</p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRecordingRecovery(null);
+                              setRecordingError("");
+                              window.setTimeout(() => void startRecordingRef.current?.(), 0);
+                            }}
+                            className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-semibold text-white hover:bg-gray-800"
+                          >
+                            Try speaking again
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              responseModeRef.current = "text";
+                              setRecordingRecovery(null);
+                              setRecordingError("");
+                              setResponseMode("text");
+                            }}
+                            className="rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-100"
+                          >
+                            Type instead
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {recordingState === "idle" && recordingRecovery === null && (
                       <button
                         type="button"
                         onClick={() => void startRecording()}

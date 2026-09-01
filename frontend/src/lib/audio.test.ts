@@ -175,19 +175,33 @@ describe("SpeechEndpointDetector", () => {
   it("keeps the default qualitative-interview mic open through a three-second thinking pause", () => {
     const detector = new SpeechEndpointDetector();
     detector.update(0.08, 0);
-    detector.update(0.08, 160);
-    expect(detector.update(0.002, 1_900)).toBe("grace");
+    detector.update(0.08, 320);
+    expect(detector.update(0.002, 1_950)).toBe("grace");
     expect(detector.update(0.002, 3_160)).toBe("grace");
     expect(detector.update(0.08, 3_200)).toBe("grace");
-    expect(detector.update(0.08, 3_360)).toBe("speaking");
+    expect(detector.update(0.08, 3_520)).toBe("speaking");
   });
 
   it("ends a default turn only after more than four seconds of quiet", () => {
     const detector = new SpeechEndpointDetector();
     detector.update(0.08, 0);
-    detector.update(0.08, 160);
-    expect(detector.update(0.002, 1_800)).toBe("grace");
-    expect(detector.update(0.002, 4_350)).toBe("grace");
-    expect(detector.update(0.002, 4_410)).toBe("ended");
+    detector.update(0.08, 320);
+    expect(detector.update(0.002, 1_950)).toBe("grace");
+    expect(detector.update(0.002, 4_500)).toBe("grace");
+    expect(detector.update(0.002, 4_570)).toBe("ended");
+  });
+
+  it("does not arm automatic endpointing for a short ambient-noise burst", () => {
+    const detector = new SpeechEndpointDetector();
+    expect(detector.update(0.03, 0)).toBe("waiting");
+    expect(detector.update(0.03, 200)).toBe("waiting");
+    expect(detector.update(0.002, 260)).toBe("waiting");
+    expect(detector.update(0.002, 5_000)).toBe("waiting");
+  });
+
+  it("still arms automatic endpointing for sustained speech", () => {
+    const detector = new SpeechEndpointDetector();
+    expect(detector.update(0.04, 0)).toBe("waiting");
+    expect(detector.update(0.04, 320)).toBe("speaking");
   });
 });

@@ -46,7 +46,10 @@ export class SpeechEndpointDetector {
   private phase: SpeechEndpointPhase = "waiting";
 
   constructor(options: SpeechEndpointOptions = {}) {
-    this.minSpeechMs = options.minSpeechMs ?? 140;
+    // A keyboard tap, chair movement, or short background sound should not arm
+    // automatic endpointing. Most spoken replies comfortably exceed 300 ms,
+    // while brief ambient bursts generally do not.
+    this.minSpeechMs = options.minSpeechMs ?? 300;
     // Qualitative answers often contain thinking pauses. Keep the microphone
     // open for roughly four seconds of quiet by default; resumed speech during
     // that window cancels endpointing immediately after sustained voice.
