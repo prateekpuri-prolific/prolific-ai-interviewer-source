@@ -32,6 +32,7 @@ from app.pipeline.interview_guide import (
     TurnDecision,
     build_structured_prompt,
     classify_participant_turn,
+    clarification_pause_response,
     conditional_module_skip_index,
     control_marker_prefix,
     resolve_role_guide,
@@ -843,6 +844,42 @@ class TestInterviewGuideProcessor:
         assert snap["total_questions"] == 2
         assert snap["user_has_spoken"] is False
 
+    def test_voice_scope_pause_resumes_exact_suspended_question(
+        self, two_question_guide
+    ):
+        processor = InterviewGuideProcessor(two_question_guide)
+        processor.review_turn(
+            "Tell me about your typical day.",
+            1,
+            TurnDecision(action="main", question=1, intent="q1:main"),
+            "Ready.",
+        )
+
+        clarification = processor.review_turn(
+            "Both workdays and weekends count. What's your biggest pain point?",
+            None,
+            TurnDecision(action="clarify", question=1),
+            "Do you mean workdays, or weekends too?",
+        )
+
+        assert clarification.text.startswith("Both workdays and weekends count.")
+        assert clarification.text.endswith("you'd like to ask first?")
+        assert "biggest pain point" not in clarification.text
+
+        resumed = processor.review_turn(
+            "What's your biggest pain point?",
+            2,
+            TurnDecision(action="main", question=2, intent="q2:main"),
+            "Yes, that answers it.",
+        )
+
+        assert resumed.reason == "interruption_resumed"
+        assert resumed.decision.action == "clarify"
+        assert resumed.text == (
+            "Okay—let's continue. Tell me about your typical day."
+        )
+        assert processor.current_question_index == 0
+
     def test_voice_fixed_mode_rejects_mislabeled_generated_followup(
         self, two_question_guide
     ):
@@ -1221,6 +1258,324 @@ class TestTextStructuredController:
         assert settings["profile"] == "repair_only"
         assert settings["allow_follow_ups"] is False
         assert settings["allow_coverage_clarifications"] is True
+
+    def test_scope_answer_is_preserved_and_paused_before_guide_resumes(self):
+        guide = {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {
+                    "id": "inputs",
+                    "text": "What did you give the AI to work with?",
+                    "evidence_goal": ["Instructions and source material"],
+                },
+                {
+                    "id": "outcome",
+                    "text": "What happened next?",
+                    "evidence_goal": ["Outcome"],
+                },
+            ],
+        }
+        controller = TextStructuredController(guide)
+        controller.review_turn(
+            "What did you give the AI to work with?",
+            1,
+            TurnDecision(action="main", question=1, intent="inputs:main"),
+            "Yes, I am ready.",
+        )
+
+        review = controller.review_turn(
+            "Both files and written instructions count. What happened next?",
+            None,
+            TurnDecision(action="clarify", question=1),
+            "Do you mean files, or also the instructions I wrote?",
+        )
+
+        assert review.decision.action == "clarify"
+        assert review.marker is None
+        assert review.reason == "clarification_paused"
+        assert review.text.startswith("Both files and written instructions count.")
+        assert review.text.endswith("you'd like to ask first?")
+        assert "What happened next?" not in review.text
+        assert review.text.count("?") == 1
+        assert controller.current_prompt_text == "What did you give the AI to work with?"
+
+    def test_clarification_pause_helper_rejects_a_bare_guide_question(self):
+        assert clarification_pause_response("What happened next?") == ""
+
+    def test_repair_only_spends_one_repair_before_advancing_partial_answer(self):
+        guide = {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {
+                    "id": "inputs",
+                    "text": "What did you give the AI to work with?",
+                    "evidence_goal": ["Instructions", "Source material"],
+                    "probes": [],
+                },
+                {
+                    "id": "outcome",
+                    "text": "What happened next?",
+                    "evidence_goal": ["Outcome"],
+                },
+            ],
+        }
+        controller = TextStructuredController(guide)
+        controller.review_turn(
+            "What did you give the AI to work with?",
+            1,
+            TurnDecision(action="main", question=1, intent="inputs:main"),
+            "Yes, I am ready.",
+        )
+
+        repair = controller.review_turn(
+            "What happened next?",
+            2,
+            TurnDecision(
+                action="main",
+                question=2,
+                intent="outcome:main",
+                resolved={"inputs:e1": "partial", "inputs:e2": "partial"},
+            ),
+            "I gave it some context.",
+        )
+
+        assert repair.replaced is True
+        assert repair.reason == "partial_answer_repair"
+        assert repair.decision.action == "probe"
+        assert repair.decision.question == 1
+        assert repair.text == (
+            "What type of information or material did you give the AI—for "
+            "example, instructions, a spreadsheet, a document, an image, or "
+            "prior conversation? Please describe the type only, not its contents."
+        )
+
+        advance = controller.review_turn(
+            "What happened next?",
+            2,
+            TurnDecision(
+                action="main",
+                question=2,
+                intent="outcome:main",
+                resolved={"inputs:e1": "partial", "inputs:e2": "partial"},
+            ),
+            "I included a brief, a spreadsheet, and two example outputs.",
+        )
+
+        assert advance.replaced is False
+        assert advance.decision.action == "main"
+        assert advance.decision.question == 2
+
+    @staticmethod
+    def _repair_only_cross_card_guide() -> dict:
+        return {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {
+                    "id": "role",
+                    "text": "What kind of work do you do?",
+                    "evidence_goal": ["Role or broad type of work"],
+                },
+                {
+                    "id": "task",
+                    "text": "What recent task did you try to do with AI?",
+                    "evidence_goal": ["One recent attempted AI task"],
+                },
+                {
+                    "id": "tool",
+                    "text": "Which AI did you use?",
+                    "evidence_goal": [
+                        "AI product or tool name",
+                        "Model family or version when known, otherwise explicit unknown",
+                    ],
+                },
+                {
+                    "id": "inputs",
+                    "text": "What types of material did you give it?",
+                    "evidence_goal": [
+                        "Types of instructions or source material supplied",
+                        "Types of relevant context or constraints supplied",
+                    ],
+                },
+                {
+                    "id": "failure",
+                    "text": "What kind of problem did you notice?",
+                    "evidence_goal": [
+                        "One specific category of observed AI error or omission",
+                        "Reason the output could not be used as-is",
+                    ],
+                },
+                {
+                    "id": "checking",
+                    "text": "How did you check the result?",
+                    "evidence_goal": ["Verification process"],
+                },
+            ],
+            "closing_message": "Done.",
+        }
+
+    def test_repair_only_skips_every_fully_answered_downstream_card(self):
+        c = TextStructuredController(self._repair_only_cross_card_guide())
+        c.review_turn(
+            "What kind of work do you do?",
+            1,
+            TurnDecision(action="main", question=1, intent="role:main"),
+            "Ready.",
+        )
+
+        review = c.review_turn(
+            "How did you check the result?",
+            6,
+            TurnDecision(
+                action="main",
+                question=6,
+                intent="checking:main",
+                resolved={
+                    "role:e1": "covered",
+                    "task:e1": "covered",
+                    "tool:e1": "covered",
+                    "tool:e2": "covered",
+                    "inputs:e1": "covered",
+                    "inputs:e2": "covered",
+                    "failure:e1": "covered",
+                    "failure:e2": "covered",
+                },
+                focal_entity="budget reconciliation",
+            ),
+            (
+                "I am a financial analyst. This month I used ChatGPT with a "
+                "known model to reconcile a budget. I supplied spreadsheets, "
+                "written rules, and a reporting constraint. It omitted a line "
+                "item, which made the report unusable until I fixed it."
+            ),
+        )
+
+        assert review.replaced is False
+        assert review.question_index == 5
+        assert review.text == "How did you check the result?"
+        assert c.stats()["covered_questions_skipped"] == 4
+
+    def test_repair_only_replaces_partially_answered_future_main_with_missing_detail(self):
+        c = TextStructuredController(self._repair_only_cross_card_guide())
+        c.review_turn(
+            "What kind of work do you do?",
+            1,
+            TurnDecision(action="main", question=1, intent="role:main"),
+            "Ready.",
+        )
+        c.review_turn(
+            "What recent task did you try to do with AI?",
+            2,
+            TurnDecision(
+                action="main",
+                question=2,
+                intent="task:main",
+                resolved={
+                    "role:e1": "covered",
+                    "tool:e1": "covered",
+                },
+            ),
+            "I am an analyst and I used ChatGPT, but I did not catch the model name.",
+        )
+
+        repair = c.review_turn(
+            "Which AI did you use?",
+            3,
+            TurnDecision(
+                action="main",
+                question=3,
+                intent="tool:main",
+                resolved={"task:e1": "covered"},
+            ),
+            "I used it this month to check a budget report.",
+        )
+
+        assert repair.replaced is True
+        assert repair.reason == "broad_main_after_partial_answer"
+        assert repair.decision.action == "probe"
+        assert repair.decision.question == 3
+        assert repair.text == (
+            "Do you know which model family or version it was? If not, that's fine."
+        )
+
+    def test_missing_turn_marker_with_named_product_recovers_model_only_repair(self):
+        c = TextStructuredController(self._repair_only_cross_card_guide())
+        c.review_turn(
+            "What kind of work do you do?",
+            1,
+            TurnDecision(action="main", question=1, intent="role:main"),
+            "Ready.",
+        )
+        c.review_turn(
+            "What recent task did you try to do with AI?",
+            2,
+            TurnDecision(
+                action="main",
+                question=2,
+                intent="task:main",
+                resolved={"role:e1": "covered"},
+            ),
+            "I am a software developer.",
+        )
+
+        review = c.review_turn(
+            "Which AI did you use?",
+            3,
+            None,
+            (
+                "This month I used ChatGPT to update a reporting script, but "
+                "its changes broke the output formatting."
+            ),
+        )
+
+        assert review.replaced is True
+        assert review.reason == "broad_main_after_partial_answer"
+        assert review.decision.action == "probe"
+        assert review.decision.question == 3
+        assert review.text == (
+            "Do you know which model family or version it was? If not, that's fine."
+        )
+        assert c.stats()["inline_decision_recoveries"] == 1
+
+    def test_repair_only_skips_a_future_card_covered_before_it_was_reached(self):
+        c = TextStructuredController(self._repair_only_cross_card_guide())
+        c.review_turn(
+            "What kind of work do you do?",
+            1,
+            TurnDecision(action="main", question=1, intent="role:main"),
+            "Ready.",
+        )
+        c.review_turn(
+            "What recent task did you try to do with AI?",
+            2,
+            TurnDecision(
+                action="main",
+                question=2,
+                intent="task:main",
+                resolved={
+                    "role:e1": "covered",
+                    "tool:e1": "covered",
+                    "tool:e2": "covered",
+                },
+            ),
+            "I am an analyst. I used Claude with Sonnet for the task.",
+        )
+
+        review = c.review_turn(
+            "What types of material did you give it?",
+            4,
+            TurnDecision(
+                action="main",
+                question=4,
+                intent="inputs:main",
+                resolved={"task:e1": "covered"},
+            ),
+            "The task was reconciling a budget report this month.",
+        )
+
+        assert review.replaced is False
+        assert review.question_index == 3
+        assert review.text == "What types of material did you give it?"
+        assert c.stats()["covered_questions_skipped"] == 1
 
     def test_rhetorical_answer_cannot_be_relabelled_as_clarification(self):
         guide = {

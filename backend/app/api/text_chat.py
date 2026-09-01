@@ -861,7 +861,7 @@ async def text_chat_ws(
     final_status = SessionStatus.COMPLETED
     final_reason = "interview_complete"
     participant_experience_events: list[dict[str, object]] = []
-    awaiting_procedural_confirmation = False
+    awaiting_interruption_confirmation = False
     prioritization_injected = False
     final_question_asked = False
     try:
@@ -1084,16 +1084,16 @@ async def text_chat_ws(
                     procedural_resume_response,
                 )
 
-                # A study/privacy answer creates a real conversational pause.
+                # A study/privacy or scope answer creates a real pause.
                 # Do not treat a short "yes" as research evidence and do not
                 # re-ask the suspended guide question until the participant
                 # has explicitly said they are ready.
-                if awaiting_procedural_confirmation:
+                if awaiting_interruption_confirmation:
                     if looks_like_procedural_resume(user_text):
                         interruption_reply = procedural_resume_response(
                             structured_controller.current_prompt_text
                         )
-                        awaiting_procedural_confirmation = False
+                        awaiting_interruption_confirmation = False
                         messages.append({
                             "role": "assistant",
                             "content": interruption_reply,
@@ -1131,7 +1131,7 @@ async def text_chat_ws(
                         # Participants sometimes answer the suspended research
                         # question directly instead of saying "continue".
                         # Respect that choice and resume normal orchestration.
-                        awaiting_procedural_confirmation = False
+                        awaiting_interruption_confirmation = False
 
                 interruption_reply = participant_interruption_response(
                     user_text,
@@ -1143,7 +1143,7 @@ async def text_chat_ws(
                     if classify_participant_turn(
                         user_text, agent_cfg["language"] or "en"
                     ) == "procedural":
-                        awaiting_procedural_confirmation = True
+                        awaiting_interruption_confirmation = True
                     messages.append({
                         "role": "assistant",
                         "content": interruption_reply,
@@ -1310,6 +1310,21 @@ async def text_chat_ws(
                     display_text = review.text
                     marker = review.marker
                     decision = review.decision
+
+                    # Semantic definition/scope questions use the same real
+                    # pause as privacy questions. The shared controller has
+                    # preserved the answer and removed any appended guide
+                    # question; wait for an explicit yes before repeating the
+                    # exact suspended question.
+                    if (
+                        classify_participant_turn(
+                            user_text, agent_cfg["language"] or "en"
+                        )
+                        == "clarification"
+                        and decision is not None
+                        and decision.action == "clarify"
+                    ):
+                        awaiting_interruption_confirmation = True
 
                     # One question per turn, like the voice filter. We cut the
                     # extra from the context too, otherwise a crammed-in second
