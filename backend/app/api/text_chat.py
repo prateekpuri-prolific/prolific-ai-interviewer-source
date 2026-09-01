@@ -53,6 +53,18 @@ _MAX_CHAT_DURATION = 7200  # 2 hours absolute ceiling
 _KEEPALIVE_INTERVAL = 20  # seconds between keepalive pings
 _INACTIVITY_WARNING_SECONDS = 60
 _INACTIVITY_CLOSE_GRACE_SECONDS = 60
+_PARTICIPANT_EXPERIENCE_EVENTS = {
+    "connection_opened",
+    "first_prompt_received",
+    "first_answer_submitted",
+    "response_mode_changed",
+    "transcription_started",
+    "transcription_succeeded",
+    "transcription_failed",
+    "automatic_endpoint_triggered",
+    "finish_requested",
+    "inactivity_resumed",
+}
 
 # OpenAI EU regional API (mirrors app.pipeline.runner)
 _OPENAI_EU_BASE_URL = "https://eu.api.openai.com/v1"
@@ -848,6 +860,7 @@ async def text_chat_ws(
     keepalive_task = asyncio.create_task(_keepalive_loop(websocket, keepalive_stop))
     final_status = SessionStatus.COMPLETED
     final_reason = "interview_complete"
+    participant_experience_events: list[dict[str, object]] = []
     awaiting_procedural_confirmation = False
     prioritization_injected = False
     final_question_asked = False
@@ -939,6 +952,31 @@ async def text_chat_ws(
             # complete answer is submitted. Throttled activity signals keep a
             # genuinely active participant from being timed out mid-answer.
             if msg.get("type") == "keepalive":
+                continue
+
+            if msg.get("type") == "experience_event":
+                event_name = str(msg.get("event") or "").strip()
+                if (
+                    event_name in _PARTICIPANT_EXPERIENCE_EVENTS
+                    and len(participant_experience_events) < 50
+                ):
+                    raw_payload = msg.get("payload")
+                    payload = {}
+                    if isinstance(raw_payload, dict):
+                        for key, value in list(raw_payload.items())[:8]:
+                            safe_key = str(key)[:40]
+                            if isinstance(value, (bool, int, float)) or value is None:
+                                payload[safe_key] = value
+                            elif isinstance(value, str):
+                                payload[safe_key] = value[:120]
+                    participant_experience_events.append({
+                        "event": event_name,
+                        "elapsed_seconds": round(
+                            (datetime.now(timezone.utc) - start_time).total_seconds(),
+                            2,
+                        ),
+                        "payload": payload,
+                    })
                 continue
 
             # Ending the interview is a distinct control action, not an empty
@@ -1391,6 +1429,15 @@ async def text_chat_ws(
                                 if mic_check_status
                                 in {"idle", "ready", "quiet", "denied", "unavailable"}
                                 else None
+                            ),
+                            "events": participant_experience_events,
+                            "milestones": sorted({
+                                str(event["event"])
+                                for event in participant_experience_events
+                            }),
+                            "transcription_failures": sum(
+                                event.get("event") == "transcription_failed"
+                                for event in participant_experience_events
                             ),
                         },
                         "protocol": (

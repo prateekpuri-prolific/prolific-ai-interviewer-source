@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
@@ -217,6 +218,19 @@ Design requirements:
   first-time warm-up for returning participants.
 - Mark questions with phase=warm_up/core/closing and
   visit_scope=first_time/returning/all so the runtime can select them.
+- Give every question a concise, semantic, unique stable ID. Never create
+  copy-style IDs such as `question_copy`; retain an existing ID when revising
+  the same card. Use `depends_on` only when a later card is unintelligible or
+  unsafe before a named earlier anchor, and mark truly indispensable anchors
+  `always_ask=true`.
+- Choose one explicit orchestration_profile for the whole guide. Use
+  `repair_only` for a standardized guide that permits one narrow answer-quality
+  repair but no exploratory follow-ups; `semi_structured` for authored probes
+  with bounded conversational flexibility; `exploratory` only when the
+  researcher explicitly wants emergent probing; and `fixed` for an exact
+  question sequence without evidence skipping. Do not combine a profile with
+  contradictory legacy flags or give a follow-up profile zero follow-up
+  capacity on every card.
 - Warm-up is not demographic intake. Never request names, exact locations,
   employers, schools, child identifiers, or profile facts already supplied by
   recruitment. Do not fabricate interviewer self-disclosure or shared lived
@@ -227,6 +241,14 @@ Design requirements:
   specific incidents, meaning, unmet needs, and a short closing reflection.
 - Each main question needs a purpose, evidence goal, things not to assume, and
   1-3 short probes. Probes must be optional routes, not a mandatory checklist.
+- Make evidence goals atomic enough to drive a real follow-up decision. For a
+  concrete episode, cover the observable sequence, consequence or outcome,
+  and source of knowledge; when change over time matters, explicitly seek a
+  reference period plus recurrence, persistence, or a before-and-after point.
+- Audit adjacent cards and probes for semantic duplication. A probe should fill
+  one named evidence gap, not invite the participant to repeat the episode or
+  example they just gave. Do not use a generic "give me an example" probe on a
+  card that is already anchored in a concrete incident.
 - Never ask a compound question, imply that a problem exists, praise an answer,
   diagnose a child/student, or ask the participant to speculate as fact.
 - Ask one question at a time. Use critical-incident probes such as what happened,
@@ -286,6 +308,9 @@ Editing contract:
 - Probes are optional routes, not a checklist. Keep them short and grounded in
   evidence gaps. Separate direct observation, reports, and inference where
   relevant.
+- A probe must add evidence the main answer may genuinely leave missing. Avoid
+  generic requests for another example when the participant will already have
+  supplied a concrete episode, and avoid duplicating adjacent cards.
 - Never request names, schools, locations, usernames, private messages, or
   other identifying information about children or third parties.
 - Follow the output schema's enums exactly. Question priority is only
@@ -420,6 +445,83 @@ def _normalize_question_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             )
 
     if isinstance(guide, dict):
+        # Preserve existing semantic IDs when possible, but make model-authored
+        # omissions and copy-suffix collisions deterministic before Pydantic's
+        # launch contract validates the draft.
+        used_ids: set[str] = set()
+        first_id_mapping: dict[str, str] = {}
+        guide_questions = [q for q in guide.get("questions", []) if isinstance(q, dict)]
+        for index, question in enumerate(guide_questions):
+            old_id = str(question.get("id") or "").strip()
+            seed = old_id or str(question.get("module") or "") or str(question.get("text") or "")
+            base = re.sub(r"[^a-z0-9]+", "_", seed.lower()).strip("_")[:64]
+            base = re.sub(r"(?:_copy(?:_\d+)?)$", "", base).strip("_")
+            base = base or f"question_{index + 1}"
+            candidate = base
+            suffix = 2
+            while candidate in used_ids:
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            question["id"] = candidate
+            used_ids.add(candidate)
+            if old_id:
+                first_id_mapping.setdefault(old_id, candidate)
+
+        positions = {
+            str(question["id"]): index for index, question in enumerate(guide_questions)
+        }
+        for index, question in enumerate(guide_questions):
+            dependencies: list[str] = []
+            for raw_dependency in question.get("depends_on") or []:
+                dependency = first_id_mapping.get(
+                    str(raw_dependency), str(raw_dependency)
+                )
+                if (
+                    dependency in positions
+                    and positions[dependency] < index
+                    and dependency not in dependencies
+                ):
+                    dependencies.append(dependency)
+            question["depends_on"] = dependencies
+
+        profile = str(guide.get("orchestration_profile") or "").strip().lower()
+        if profile not in {
+            "fixed", "repair_only", "semi_structured", "exploratory"
+        }:
+            allow_follow_ups = guide.get("allow_follow_ups", True) is not False
+            skip_answered = guide.get("skip_answered_questions")
+            skip_answered = allow_follow_ups if skip_answered is None else bool(skip_answered)
+            allow_emergent = bool(guide.get("allow_emergent_follow_ups", False))
+            has_capacity = any(
+                int(question.get("max_follow_ups", 3) or 0) > 0
+                and (
+                    bool(question.get("probes"))
+                    or allow_emergent
+                    or "max_follow_ups" not in question
+                )
+                for question in guide_questions
+            )
+            if not allow_follow_ups or not has_capacity:
+                profile = "repair_only" if skip_answered else "fixed"
+            elif allow_emergent:
+                profile = "exploratory"
+            else:
+                profile = "semi_structured"
+            guide["orchestration_profile"] = profile
+
+        profile_rules = {
+            "fixed": (False, False, False),
+            "repair_only": (False, True, False),
+            "semi_structured": (True, True, False),
+            "exploratory": (True, True, True),
+        }
+        if profile in profile_rules:
+            (
+                guide["allow_follow_ups"],
+                guide["skip_answered_questions"],
+                guide["allow_emergent_follow_ups"],
+            ) = profile_rules[profile]
+
         selection = str(guide.get("probe_selection") or "").strip().lower()
         if selection not in {"ordered", "relevance"}:
             guide["probe_selection"] = "relevance"

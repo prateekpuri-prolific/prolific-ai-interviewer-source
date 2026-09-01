@@ -45,8 +45,8 @@ def test_composer_normalizes_semantic_question_metadata_labels():
 
     assert normalized["interview_guide"]["probe_selection"] == "relevance"
     assert normalized["interview_guide"]["questions"] == [
-        {"priority": "required", "sensitivity": "elevated"},
-        {"priority": "optional", "sensitivity": "standard"},
+        {"priority": "required", "sensitivity": "elevated", "id": "question_1", "depends_on": []},
+        {"priority": "optional", "sensitivity": "standard", "id": "question_2", "depends_on": []},
     ]
 
 
@@ -184,7 +184,12 @@ def test_composer_normalizes_nested_audit_output():
 
     assert normalized["audit"]["goal_fit"]["score"] == 4.5
     question = normalized["draft"]["interview_guide"]["questions"][0]
-    assert question == {"priority": "required", "sensitivity": "elevated"}
+    assert question == {
+        "priority": "required",
+        "sensitivity": "elevated",
+        "id": "question_1",
+        "depends_on": [],
+    }
     assert normalized["draft"]["interview_guide"]["probe_selection"] == "relevance"
 
 

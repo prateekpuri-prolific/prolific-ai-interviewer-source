@@ -61,6 +61,14 @@ class InterviewQuestion(BaseModel):
             "even when its evidence was supplied earlier."
         ),
     )
+    depends_on: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description=(
+            "Stable question IDs that must be reached before this card can "
+            "be asked. Use this for modules that depend on an earlier anchor."
+        ),
+    )
     role_variants: dict[str, str | dict] = Field(
         default_factory=dict,
         description=(
@@ -80,6 +88,15 @@ class InterviewGuide(BaseModel):
         ...,
         min_length=1,
         description="Ordered list of interview questions",
+    )
+    orchestration_profile: Literal[
+        "fixed", "repair_only", "semi_structured", "exploratory"
+    ] | None = Field(
+        None,
+        description=(
+            "Interview-control policy. Null preserves legacy guides and is "
+            "resolved deterministically at runtime."
+        ),
     )
     closing_message: str | None = Field(
         "Thank you for your time. This concludes our interview.",
@@ -118,6 +135,73 @@ class InterviewGuide(BaseModel):
             "not address an evidence gap. The max_follow_ups cap still applies."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_protocol_structure(self) -> "InterviewGuide":
+        ids = [question.id for question in self.questions if question.id]
+        duplicates = sorted({question_id for question_id in ids if ids.count(question_id) > 1})
+        # Legacy persisted guides may contain duplicate IDs. They remain
+        # readable so the composer can migrate them; every explicit-profile
+        # guide is held to the new stable-ID contract.
+        if duplicates and self.orchestration_profile:
+            raise ValueError(
+                "Question IDs must be unique; duplicates: " + ", ".join(duplicates)
+            )
+
+        positions = {question.id: index for index, question in enumerate(self.questions) if question.id}
+        for index, question in enumerate(self.questions):
+            if question.depends_on and not question.id:
+                raise ValueError("A question with dependencies must have a stable ID.")
+            for dependency in question.depends_on:
+                if dependency not in positions:
+                    raise ValueError(
+                        f"Question {question.id!r} depends on unknown question ID {dependency!r}."
+                    )
+                if positions[dependency] >= index:
+                    raise ValueError(
+                        f"Question {question.id!r} must depend only on an earlier question."
+                    )
+
+        profile_rules = {
+            "fixed": (False, False, False),
+            "repair_only": (False, True, False),
+            "semi_structured": (True, True, False),
+            "exploratory": (True, True, True),
+        }
+        if self.orchestration_profile:
+            expected = profile_rules[self.orchestration_profile]
+            configured = (
+                self.allow_follow_ups,
+                self.skip_answered_questions,
+                self.allow_emergent_follow_ups,
+            )
+            field_names = (
+                "allow_follow_ups",
+                "skip_answered_questions",
+                "allow_emergent_follow_ups",
+            )
+            for field_name, actual, required in zip(field_names, configured, expected):
+                if field_name in self.model_fields_set and actual is not None and actual != required:
+                    raise ValueError(
+                        f"orchestration_profile={self.orchestration_profile!r} "
+                        f"requires {field_name}={required}."
+                    )
+            self.allow_follow_ups = expected[0]
+            self.skip_answered_questions = expected[1]
+            self.allow_emergent_follow_ups = expected[2]
+
+            if self.orchestration_profile in {"semi_structured", "exploratory"}:
+                has_capacity = any(
+                    question.max_follow_ups > 0
+                    and (question.probes or self.orchestration_profile == "exploratory")
+                    for question in self.questions
+                )
+                if not has_capacity:
+                    raise ValueError(
+                        f"orchestration_profile={self.orchestration_profile!r} "
+                        "requires at least one question with follow-up capacity."
+                    )
+        return self
 
 
 # ── Engagement config sub-schemas ────────────────────────────

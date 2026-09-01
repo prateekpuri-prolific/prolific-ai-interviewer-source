@@ -41,6 +41,7 @@ from app.pipeline.interview_guide import (
     looks_like_procedural_resume,
     participant_interruption_response,
     procedural_resume_response,
+    resolve_orchestration_settings,
     strip_control_markers,
     strip_progress_marker,
 )
@@ -656,6 +657,8 @@ class TestLooksLikeClarification:
             "",
             "I really like soccer and I do research.",
             "I kind of started analyzing data to figure out the best team.",
+            "Would I check every item before using it?",
+            "Will I correct them manually?",
             # Long answers ending in "?" are not clarifications.
             "I spent years collecting match data, building models, and "
             "comparing predictions to actual outcomes — does that count as "
@@ -1207,6 +1210,86 @@ class TestTextStructuredController:
         assert snap["current_question_index"] == 0
         assert snap["nudge_pending"] is False
 
+    def test_legacy_zero_probe_contradiction_resolves_to_repair_only(self):
+        settings = resolve_orchestration_settings({
+            "allow_follow_ups": True,
+            "skip_answered_questions": True,
+            "allow_emergent_follow_ups": False,
+            "questions": [{"text": "Question?", "max_follow_ups": 0, "probes": []}],
+        })
+
+        assert settings["profile"] == "repair_only"
+        assert settings["allow_follow_ups"] is False
+        assert settings["allow_coverage_clarifications"] is True
+
+    def test_rhetorical_answer_cannot_be_relabelled_as_clarification(self):
+        guide = {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {"id": "checking", "text": "How did you check it?", "evidence_goal": ["Checking process"]},
+                {"id": "outcome", "text": "What happened next?", "evidence_goal": ["Outcome"]},
+            ],
+            "closing_message": "Done.",
+        }
+        c = TextStructuredController(guide)
+        c.review_turn(
+            "How did you check it?",
+            1,
+            TurnDecision(action="main", question=1, intent="checking:main"),
+            "Ready.",
+        )
+
+        review = c.review_turn(
+            "How did you check it?",
+            None,
+            TurnDecision(
+                action="clarify",
+                question=1,
+                resolved={"checking:e1": "covered"},
+            ),
+            "Would I check every item before using it?",
+        )
+
+        assert review.replaced is True
+        assert review.reason == "clarify_without_participant_request"
+        assert review.text == "What happened next?"
+
+    def test_marker_cannot_jump_over_protected_anchor(self):
+        guide = {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {"id": "anchor", "text": "Describe one recent task.", "always_ask": True},
+                {"id": "detail", "text": "What tool did you use?"},
+                {"id": "outcome", "text": "What happened?"},
+            ],
+        }
+        c = TextStructuredController(guide)
+
+        c.sync_to_marker(3)
+
+        assert c.current_question_index == 0
+
+    def test_dependency_is_server_enforced(self):
+        guide = {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {"id": "episode", "text": "Describe one recent task."},
+                {"id": "inputs", "text": "What did you give it?", "depends_on": ["episode"]},
+            ],
+        }
+        c = TextStructuredController(guide)
+
+        review = c.review_turn(
+            "What did you give it?",
+            2,
+            TurnDecision(action="main", question=2, intent="inputs:main"),
+            "Ready.",
+        )
+
+        assert review.replaced is True
+        assert review.reason == "unmet_anchor_or_dependency"
+        assert review.text == "Describe one recent task."
+
     def test_disabled_follow_ups_advance_after_one_main_question(
         self, two_question_guide
     ):
@@ -1623,6 +1706,72 @@ class TestTextStructuredController:
         assert review.decision is not None
         assert review.decision.intent == "episode:p2"
 
+    def test_exploratory_relevance_probe_can_use_grounded_wording(self):
+        guide = {
+            "orchestration_profile": "exploratory",
+            "probe_selection": "relevance",
+            "questions": [
+                {
+                    "id": "episode",
+                    "text": "What happened?",
+                    "probes": ["How did you assess the result?"],
+                    "evidence_goal": ["Basis for assessment"],
+                    "max_follow_ups": 1,
+                }
+            ],
+        }
+        c = TextStructuredController(guide)
+        c.review_turn(
+            "What happened?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+
+        review = c.review_turn(
+            "What did you see when you checked one citation against the report?",
+            None,
+            TurnDecision(action="probe", question=1, intent="episode:p1"),
+            "I checked three citations against the reports and two were unsupported.",
+        )
+
+        assert review.replaced is False
+        assert review.text == (
+            "What did you see when you checked one citation against the report?"
+        )
+        assert c.stats()["adaptive_probe_wording_accepted"] == 1
+
+    def test_exploratory_relevance_probe_still_blocks_leading_wording(self):
+        guide = {
+            "orchestration_profile": "exploratory",
+            "probe_selection": "relevance",
+            "questions": [
+                {
+                    "id": "episode",
+                    "text": "What happened?",
+                    "probes": ["How did you assess the result?"],
+                    "evidence_goal": ["Basis for assessment"],
+                    "max_follow_ups": 1,
+                }
+            ],
+        }
+        c = TextStructuredController(guide)
+        c.review_turn(
+            "What happened?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+
+        review = c.review_turn(
+            "Surely the unsupported citations made the assistant untrustworthy?",
+            None,
+            TurnDecision(action="probe", question=1, intent="episode:p1"),
+            "I checked three citations and two were unsupported.",
+        )
+
+        assert review.replaced is True
+        assert review.reason == "listed_probe_wording_corrected"
+        assert review.text == "How did you assess the result?"
+
     def test_adversarial_emergent_probe_is_blocked_when_disabled(self):
         guide = {
             "allow_emergent_follow_ups": False,
@@ -2021,9 +2170,7 @@ class TestTextStructuredController:
         assert review.replaced is True
         assert review.reason == "clarification_advance_blocked"
         assert review.marker is None
-        assert review.text == (
-            "Let's focus on one part. What made you keep that decision for yourself?"
-        )
+        assert review.text == "What made you keep that decision for yourself?"
         assert "future" not in review.text.lower()
         assert c.current_question_index == 0
 

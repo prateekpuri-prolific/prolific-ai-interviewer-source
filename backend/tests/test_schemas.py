@@ -154,6 +154,44 @@ class TestAgentSchemas:
         assert default_guide.allow_follow_ups is True
         assert fixed_guide.allow_follow_ups is False
 
+    def test_explicit_orchestration_profile_sets_coherent_flags(self):
+        guide = InterviewGuide.model_validate({
+            "orchestration_profile": "repair_only",
+            "questions": [{"id": "task", "text": "Describe one task."}],
+        })
+
+        assert guide.allow_follow_ups is False
+        assert guide.skip_answered_questions is True
+        assert guide.allow_emergent_follow_ups is False
+
+    def test_explicit_orchestration_profile_rejects_contradictory_flags(self):
+        with pytest.raises(ValidationError, match="requires allow_follow_ups=False"):
+            InterviewGuide.model_validate({
+                "orchestration_profile": "repair_only",
+                "allow_follow_ups": True,
+                "questions": [{"id": "task", "text": "Describe one task."}],
+            })
+
+    def test_explicit_profile_rejects_duplicate_question_ids(self):
+        with pytest.raises(ValidationError, match="Question IDs must be unique"):
+            InterviewGuide.model_validate({
+                "orchestration_profile": "fixed",
+                "questions": [
+                    {"id": "task", "text": "Describe one task."},
+                    {"id": "task", "text": "What happened next?"},
+                ],
+            })
+
+    def test_dependencies_must_reference_an_earlier_question(self):
+        with pytest.raises(ValidationError, match="earlier question"):
+            InterviewGuide.model_validate({
+                "orchestration_profile": "repair_only",
+                "questions": [
+                    {"id": "inputs", "text": "What did you provide?", "depends_on": ["task"]},
+                    {"id": "task", "text": "Describe one task."},
+                ],
+            })
+
     @pytest.mark.parametrize("field,value", [
         ("phase", "onboarding"),
         ("visit_scope", "sometimes"),

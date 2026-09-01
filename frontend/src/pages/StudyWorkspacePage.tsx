@@ -66,18 +66,55 @@ const emptyQuestion = (index: number): InterviewQuestionConfig => ({
   visit_scope: "all",
   skip_remaining_module_if_not_applicable: false,
   always_ask: false,
+  depends_on: [],
   role_variants: {},
   returning_role_variants: {},
 });
 
 const emptyGuide = (): InterviewGuideConfig => ({
   questions: [emptyQuestion(0)],
+  orchestration_profile: "semi_structured",
   closing_message: "Before we finish, is there anything important that I did not ask about?",
   allow_follow_ups: true,
   skip_answered_questions: true,
   probe_selection: "relevance",
-  allow_emergent_follow_ups: true,
+  allow_emergent_follow_ups: false,
 });
+
+type OrchestrationProfile = NonNullable<InterviewGuideConfig["orchestration_profile"]>;
+
+const orchestrationRules: Record<OrchestrationProfile, Pick<InterviewGuideConfig,
+  "allow_follow_ups" | "skip_answered_questions" | "allow_emergent_follow_ups">> = {
+  fixed: { allow_follow_ups: false, skip_answered_questions: false, allow_emergent_follow_ups: false },
+  repair_only: { allow_follow_ups: false, skip_answered_questions: true, allow_emergent_follow_ups: false },
+  semi_structured: { allow_follow_ups: true, skip_answered_questions: true, allow_emergent_follow_ups: false },
+  exploratory: { allow_follow_ups: true, skip_answered_questions: true, allow_emergent_follow_ups: true },
+};
+
+const resolvedProfile = (guide: InterviewGuideConfig): OrchestrationProfile => {
+  if (guide.orchestration_profile) return guide.orchestration_profile;
+  const hasCapacity = guide.questions.some((question) =>
+    question.max_follow_ups > 0 && ((question.probes || []).length > 0 || guide.allow_emergent_follow_ups));
+  if (guide.allow_follow_ups === false || !hasCapacity) {
+    return guide.skip_answered_questions === true ? "repair_only" : "fixed";
+  }
+  return guide.allow_emergent_follow_ups ? "exploratory" : "semi_structured";
+};
+
+const withProfile = (guide: InterviewGuideConfig, profile: OrchestrationProfile): InterviewGuideConfig => ({
+  ...guide,
+  orchestration_profile: profile,
+  ...orchestrationRules[profile],
+});
+
+const uniqueQuestionId = (questions: InterviewQuestionConfig[], source: string): string => {
+  const base = (source || "question").replace(/_copy(?:_\d+)?$/, "");
+  const used = new Set(questions.map((question) => question.id).filter(Boolean));
+  let suffix = 2;
+  let candidate = `${base}_${suffix}`;
+  while (used.has(candidate)) candidate = `${base}_${++suffix}`;
+  return candidate;
+};
 
 const normalizeSpec = (value: ResearchSpec | null): ResearchSpec => {
   const base = defaultResearchSpec();
@@ -101,7 +138,9 @@ const toDraft = (study: Study, agent: Agent): WorkspaceDraft => {
     researchSpec: spec,
     systemPrompt: agent.system_prompt || "",
     welcomeMessage: agent.welcome_message || "Thanks for joining. I’ll ask one question at a time, and you can skip any question.",
-    guide: agent.interview_guide || emptyGuide(),
+    guide: agent.interview_guide
+      ? withProfile(agent.interview_guide, resolvedProfile(agent.interview_guide))
+      : emptyGuide(),
     estimatedMinutes: spec.participant_information.estimated_minutes || 15,
   };
 };
@@ -728,9 +767,8 @@ export default function StudyWorkspacePage() {
               </section>
 
               <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div className="mb-4 flex items-center justify-between"><div><h2 className="text-base font-semibold text-gray-900">Interview guide</h2><p className="mt-1 text-xs text-gray-400">{draft.guide.allow_follow_ups === false ? "Fixed questions with independently configurable evidence-aware skipping." : "Main questions and follow-up behavior are configured separately from skipping."}</p></div><button onClick={() => { const questions = [...draft.guide.questions, emptyQuestion(draft.guide.questions.length)]; commit({ ...draft, guide: { ...draft.guide, questions } }); setSelectedQuestion(questions.length - 1); }} className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">+ Question</button></div>
-                <label className="mb-4 flex items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 cursor-pointer"><input type="checkbox" className="mt-0.5" checked={draft.guide.allow_follow_ups !== false} onChange={(event) => commit({ ...draft, guide: { ...draft.guide, allow_follow_ups: event.target.checked } })} /><span><span className="block text-xs font-semibold text-gray-800">Allow follow-up questions</span><span className="mt-0.5 block text-[11px] leading-relaxed text-gray-500">Controls exploratory and listed probes only. Saved probe settings are retained when off; evidence-aware skipping is configured separately.</span></span></label>
-                <label className="mb-4 flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 cursor-pointer"><input type="checkbox" className="mt-0.5" checked={draft.guide.skip_answered_questions === true} onChange={(event) => commit({ ...draft, guide: { ...draft.guide, skip_answered_questions: event.target.checked } })} /><span><span className="block text-xs font-semibold text-gray-800">Skip questions already answered</span><span className="mt-0.5 block text-[11px] leading-relaxed text-gray-500">Skip only when every evidence goal is concretely covered. Protected anchors are still asked; a single narrow evidence clarification may be used for a partially answered future card.</span></span></label>
+                <div className="mb-4 flex items-center justify-between"><div><h2 className="text-base font-semibold text-gray-900">Interview guide</h2><p className="mt-1 text-xs text-gray-400">Choose one coherent orchestration policy; card-level anchors and dependencies remain server-enforced.</p></div><button onClick={() => { const questions = [...draft.guide.questions, emptyQuestion(draft.guide.questions.length)]; commit({ ...draft, guide: { ...draft.guide, questions } }); setSelectedQuestion(questions.length - 1); }} className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">+ Question</button></div>
+                <label className="mb-4 block rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3"><span className="block text-xs font-semibold text-gray-800">Interview behavior</span><select aria-label="Interview behavior" value={resolvedProfile(draft.guide)} onChange={(event) => commit({ ...draft, guide: withProfile(draft.guide, event.target.value as OrchestrationProfile) })} className="mt-2 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-800"><option value="fixed">Fixed — exact questions, no skipping</option><option value="repair_only">Quality control — skip covered cards, one narrow repair</option><option value="semi_structured">Semi-structured — authored probes only</option><option value="exploratory">Exploratory — authored and bounded emergent probes</option></select><span className="mt-2 block text-[11px] leading-relaxed text-gray-500">Quality control is the safest standardized option. Semi-structured is the default for qualitative interviews; exploratory should be chosen deliberately.</span></label>
                 <div className="space-y-3">
                   {draft.guide.questions.map((question, index) => <article key={question.id || index} onClick={() => { setSelectedQuestion(index); if (question.visit_scope === "first_time" || question.visit_scope === "returning") setPreviewVisit(question.visit_scope); }} className={`rounded-xl border bg-white p-4 transition ${selectedQuestion === index ? "border-[#7290ef] ring-2 ring-[#eef1ff]" : "border-gray-200 hover:border-gray-300"}`}>
                     <div className="mb-2 flex items-center gap-2"><div className="flex flex-col text-[9px] leading-none text-gray-300"><button type="button" disabled={index === 0} onClick={(event) => { event.stopPropagation(); moveQuestion(index, index - 1); }} className="disabled:opacity-20" title="Move up">▲</button><button type="button" disabled={index === draft.guide.questions.length - 1} onClick={(event) => { event.stopPropagation(); moveQuestion(index, index + 1); }} className="disabled:opacity-20" title="Move down">▼</button></div><span className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-[10px] font-semibold text-gray-600">{index + 1}</span><input value={question.module || ""} onChange={(event) => patchQuestion(index, { module: event.target.value })} className="min-w-0 flex-1 border-0 bg-transparent text-[10px] font-semibold uppercase tracking-wide text-gray-400 outline-none" placeholder="MODULE" /><button type="button" onClick={(event) => { event.stopPropagation(); openQuestionComposer(index); }} className="flex shrink-0 items-center gap-1 rounded-md border border-[#cbd5ff] bg-[#f5f7ff] px-2 py-1 text-[10px] font-semibold text-[#2f5bea] hover:border-[#9bb0f4] hover:bg-[#eef1ff]" aria-label={`Edit Question ${index + 1} with AI`}><span aria-hidden="true">✦</span> AI edit</button>{draft.guide.allow_follow_ups !== false && <select value={question.max_follow_ups} onChange={(event) => patchQuestion(index, { max_follow_ups: Number(event.target.value) })} className="rounded-md border border-gray-200 bg-white px-2 py-1 text-[10px] text-gray-600"><option value={0}>No follow-up</option><option value={1}>Short follow-up</option><option value={2}>Up to 2 probes</option><option value={3}>Up to 3 probes</option></select>}</div>
@@ -739,8 +777,8 @@ export default function StudyWorkspacePage() {
                     {draft.guide.skip_answered_questions === true && <label className="mb-3 ml-14 flex items-start gap-2 text-[10px] text-gray-500"><input type="checkbox" className="mt-0.5" checked={question.always_ask === true} onChange={(event) => patchQuestion(index, { always_ask: event.target.checked })} /><span><span className="font-semibold text-gray-600">Always ask this question</span><span className="block text-gray-400">Protect a task or module anchor even if the participant supplied its evidence earlier.</span></span></label>}
                     <textarea value={question.text} onChange={(event) => patchQuestion(index, { text: event.target.value })} rows={2} className="w-full resize-none border-0 p-0 text-[15px] font-medium leading-relaxed text-gray-900 outline-none focus:ring-0" placeholder="Ask one neutral, open question…" />
                     <div className="mt-3 grid gap-3 md:grid-cols-2"><label><span className="mb-1 block text-[10px] font-semibold text-gray-400">PURPOSE</span><textarea value={question.purpose || ""} onChange={(event) => patchQuestion(index, { purpose: event.target.value })} rows={2} className="w-full rounded-lg border border-gray-100 bg-gray-50 p-2 text-xs outline-none focus:border-[#9bb0f4]" /></label><label><span className="mb-1 block text-[10px] font-semibold text-gray-400">EVIDENCE TO LISTEN FOR — ONE PER LINE</span><textarea value={joinLines(question.evidence_goal)} onChange={(event) => patchQuestion(index, { evidence_goal: splitLines(event.target.value) })} rows={2} className="w-full rounded-lg border border-gray-100 bg-gray-50 p-2 text-xs outline-none focus:border-[#9bb0f4]" /></label></div>
-                    <details className="mt-3"><summary className="cursor-pointer text-[11px] font-medium text-[#2f5bea]">Probes, guardrails, and role-specific wording</summary><div className="mt-2 grid gap-3 md:grid-cols-2"><label><span className="mb-1 block text-[10px] text-gray-400">OPTIONAL PROBES — ONE PER LINE</span><textarea value={joinLines(question.probes)} onChange={(event) => patchQuestion(index, { probes: splitLines(event.target.value) })} rows={3} className="w-full rounded-lg border border-gray-200 p-2 text-xs" /></label><label><span className="mb-1 block text-[10px] text-gray-400">DO NOT ASSUME — ONE PER LINE</span><textarea value={joinLines(question.do_not_assume)} onChange={(event) => patchQuestion(index, { do_not_assume: splitLines(event.target.value) })} rows={3} className="w-full rounded-lg border border-gray-200 p-2 text-xs" /></label><label><span className="mb-1 block text-[10px] text-gray-400">PARENT WORDING — OPTIONAL</span><textarea value={roleText(question, "parent")} onChange={(event) => patchRoleQuestion(index, "parent", event.target.value)} rows={2} className="w-full rounded-lg border border-gray-200 p-2 text-xs" placeholder="Uses ‘your child’ where appropriate" /></label><label><span className="mb-1 block text-[10px] text-gray-400">EDUCATOR WORDING — OPTIONAL</span><textarea value={roleText(question, "educator")} onChange={(event) => patchRoleQuestion(index, "educator", event.target.value)} rows={2} className="w-full rounded-lg border border-gray-200 p-2 text-xs" placeholder="Uses ‘your students’ where appropriate" /></label></div></details>
-                    <div className="mt-3 flex items-center justify-end gap-3 border-t border-gray-100 pt-2"><button onClick={(event) => { event.stopPropagation(); const copy = clone(question); copy.id = `${question.id || "question"}_copy`; const questions = [...draft.guide.questions]; questions.splice(index + 1, 0, copy); commit({ ...draft, guide: { ...draft.guide, questions } }); }} className="text-[11px] text-gray-500 hover:text-gray-900">Duplicate</button><button disabled={draft.guide.questions.length === 1} onClick={(event) => { event.stopPropagation(); const questions = draft.guide.questions.filter((_, i) => i !== index); commit({ ...draft, guide: { ...draft.guide, questions } }); setSelectedQuestion(Math.max(0, index - 1)); }} className="text-[11px] text-red-500 disabled:opacity-30">Delete</button></div>
+                    <details className="mt-3"><summary className="cursor-pointer text-[11px] font-medium text-[#2f5bea]">Probes, guardrails, and role-specific wording</summary><div className="mt-2 grid gap-3 md:grid-cols-2"><label><span className="mb-1 block text-[10px] text-gray-400">OPTIONAL PROBES — ONE PER LINE</span><textarea value={joinLines(question.probes)} onChange={(event) => patchQuestion(index, { probes: splitLines(event.target.value) })} rows={3} className="w-full rounded-lg border border-gray-200 p-2 text-xs" /></label><label><span className="mb-1 block text-[10px] text-gray-400">DO NOT ASSUME — ONE PER LINE</span><textarea value={joinLines(question.do_not_assume)} onChange={(event) => patchQuestion(index, { do_not_assume: splitLines(event.target.value) })} rows={3} className="w-full rounded-lg border border-gray-200 p-2 text-xs" /></label><label><span className="mb-1 block text-[10px] text-gray-400">DEPENDS ON QUESTION IDS — ONE PER LINE</span><textarea value={joinLines(question.depends_on)} onChange={(event) => patchQuestion(index, { depends_on: splitLines(event.target.value).map((value) => value.trim()).filter(Boolean) })} rows={2} className="w-full rounded-lg border border-gray-200 p-2 font-mono text-xs" placeholder="consequential_task" /></label><label><span className="mb-1 block text-[10px] text-gray-400">PARENT WORDING — OPTIONAL</span><textarea value={roleText(question, "parent")} onChange={(event) => patchRoleQuestion(index, "parent", event.target.value)} rows={2} className="w-full rounded-lg border border-gray-200 p-2 text-xs" placeholder="Uses ‘your child’ where appropriate" /></label><label><span className="mb-1 block text-[10px] text-gray-400">EDUCATOR WORDING — OPTIONAL</span><textarea value={roleText(question, "educator")} onChange={(event) => patchRoleQuestion(index, "educator", event.target.value)} rows={2} className="w-full rounded-lg border border-gray-200 p-2 text-xs" placeholder="Uses ‘your students’ where appropriate" /></label></div></details>
+                    <div className="mt-3 flex items-center justify-end gap-3 border-t border-gray-100 pt-2"><button onClick={(event) => { event.stopPropagation(); const copy = clone(question); copy.id = uniqueQuestionId(draft.guide.questions, question.id || "question"); const questions = [...draft.guide.questions]; questions.splice(index + 1, 0, copy); commit({ ...draft, guide: { ...draft.guide, questions } }); }} className="text-[11px] text-gray-500 hover:text-gray-900">Duplicate</button><button disabled={draft.guide.questions.length === 1} onClick={(event) => { event.stopPropagation(); const questions = draft.guide.questions.filter((_, i) => i !== index); commit({ ...draft, guide: { ...draft.guide, questions } }); setSelectedQuestion(Math.max(0, index - 1)); }} className="text-[11px] text-red-500 disabled:opacity-30">Delete</button></div>
                   </article>)}
                 </div>
                 <label className="mt-4 block"><span className="mb-1 block text-[11px] font-semibold text-gray-600">Closing prompt</span><textarea value={draft.guide.closing_message || ""} onChange={(event) => commit({ ...draft, guide: { ...draft.guide, closing_message: event.target.value } })} rows={2} className="w-full rounded-lg border border-gray-200 p-3 text-sm" /></label>

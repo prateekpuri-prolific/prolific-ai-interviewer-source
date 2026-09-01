@@ -231,13 +231,18 @@ def looks_like_clarification(text: str, language: str = "en") -> bool:
     lang = (language or "en").split("-")[0].split("_")[0].lower()
     if _clarification_re(lang).search(text):
         return True
-    # Short question aimed back at the interviewer ("at what point?",
-    # "you mean right now?"). Long answers that merely end with a question
-    # mark are left alone. CJK has no spaces, so cap by characters there.
-    if text.endswith(("?", "？")):
-        if lang in ("zh", "ja", "ko"):
-            return len(text) <= 20
-        return len(text.split()) <= 12
+    if len(text.split()) <= 12 and re.search(
+        r"\b(?:does|do|is|are|would)\s+.+?\s+"
+        r"(?:count|qualify|apply|included|in scope)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    # A question mark is not enough. Participants often answer with a
+    # rhetorical or self-directed question ("Would I check every item?").
+    # Treating every short question as a clarification caused adequate answers
+    # to be replayed verbatim. Only the explicit, multilingual patterns above
+    # are allowed to interrupt the guide.
     return False
 
 
@@ -604,6 +609,40 @@ _RESOLUTION_STATUSES = {
     "not_applicable",
 }
 _TURN_ACTIONS = {"main", "probe", "thread", "clarify", "close"}
+
+# Exploratory interviews may adapt a listed probe to the participant's exact
+# detail.  Keep a small deterministic guard for conspicuously leading wording;
+# the model prompt remains responsible for the broader neutrality policy.
+_LEADING_PROBE_RE = re.compile(
+    r"\b(?:obviously|surely|clearly|of course|you must|don't you agree|"
+    r"wouldn't you|isn't it true)\b",
+    re.IGNORECASE,
+)
+_PROBE_GROUNDING_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "could",
+    "did",
+    "does",
+    "experience",
+    "from",
+    "have",
+    "that",
+    "their",
+    "then",
+    "there",
+    "they",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "with",
+    "would",
+    "your",
+}
 _PROVENANCE_VALUES = {"direct", "second_hand", "opinion", "mixed", "unknown"}
 _TERMINAL_STATUS_PATTERNS = {
     "unknown": re.compile(
@@ -736,6 +775,52 @@ def evidence_skipping_enabled(guide: dict, allow_follow_ups: bool) -> bool:
     if configured is None:
         return allow_follow_ups
     return bool(configured)
+
+
+def resolve_orchestration_settings(guide: dict) -> dict[str, object]:
+    """Resolve one coherent interview policy from a stored guide.
+
+    New guides name a profile explicitly. Legacy guides are migrated in
+    memory. In particular, the previously common but contradictory
+    combination "follow-ups enabled, zero capacity everywhere" becomes
+    ``repair_only`` instead of generating a forced-advance nudge every turn.
+    """
+    guide = guide or {}
+    profile = str(guide.get("orchestration_profile") or "").strip().lower()
+    profile_rules = {
+        "fixed": (False, False, False),
+        "repair_only": (False, True, False),
+        "semi_structured": (True, True, False),
+        "exploratory": (True, True, True),
+    }
+    if profile not in profile_rules:
+        legacy_follow_ups = guide.get("allow_follow_ups", True) is not False
+        legacy_skip = evidence_skipping_enabled(guide, legacy_follow_ups)
+        legacy_emergent = bool(guide.get("allow_emergent_follow_ups", False))
+        has_follow_up_capacity = any(
+            int(question.get("max_follow_ups", DEFAULT_MAX_FOLLOW_UPS) or 0) > 0
+            and (
+                bool(question.get("probes"))
+                or legacy_emergent
+                or "max_follow_ups" not in question
+            )
+            for question in guide.get("questions") or []
+        )
+        if not legacy_follow_ups or not has_follow_up_capacity:
+            profile = "repair_only" if legacy_skip else "fixed"
+        elif legacy_emergent:
+            profile = "exploratory"
+        else:
+            profile = "semi_structured"
+    allow_follow_ups, skip_answered, allow_emergent = profile_rules[profile]
+    return {
+        "profile": profile,
+        "allow_follow_ups": allow_follow_ups,
+        "skip_answered_questions": skip_answered,
+        "allow_emergent_follow_ups": allow_emergent,
+        "allow_coverage_clarifications": profile == "repair_only",
+        "allow_threading": profile in {"semi_structured", "exploratory"},
+    }
 
 
 def parse_turn_decision(payload: str) -> Optional[TurnDecision]:
@@ -1230,11 +1315,11 @@ def build_structured_prompt(
     # picks the most relevant one per answer. Same follow-up cap either way,
     # and no extra latency since the model already has the whole list.
     relevance = (guide.get("probe_selection") or "ordered").lower() == "relevance"
-    allow_follow_ups = guide.get("allow_follow_ups", True) is not False
-    skip_answered_questions = evidence_skipping_enabled(guide, allow_follow_ups)
-    allow_emergent = allow_follow_ups and bool(
-        guide.get("allow_emergent_follow_ups", False)
-    )
+    orchestration = resolve_orchestration_settings(guide)
+    orchestration_profile = str(orchestration["profile"])
+    allow_follow_ups = bool(orchestration["allow_follow_ups"])
+    skip_answered_questions = bool(orchestration["skip_answered_questions"])
+    allow_emergent = bool(orchestration["allow_emergent_follow_ups"])
 
     if not questions:
         return base_prompt
@@ -1266,6 +1351,11 @@ def build_structured_prompt(
             guide_lines.append(
                 "Evidence-skip rule: protected anchor; always ask this main "
                 "question even when its evidence appeared earlier."
+            )
+        if q.get("depends_on"):
+            guide_lines.append(
+                "Sequence dependency (server-enforced): ask only after these "
+                "question IDs have been reached: " + ", ".join(q["depends_on"])
             )
         guide_lines.append(f"Interview phase: {q.get('phase', 'core')}")
         if q.get("purpose"):
@@ -1373,7 +1463,8 @@ def build_structured_prompt(
 ## INTERVIEW PROTOCOL
 
 You are conducting a structured interview. There are {len(questions)} guide
-questions. {coverage_rule} The conversation normally follows this turn pattern:
+questions. The orchestration profile is `{orchestration_profile}`. {coverage_rule}
+The conversation normally follows this turn pattern:
 
   Q1 (main) → user → zero to the configured maximum follow-ups → Q2 → ...
 
@@ -1419,6 +1510,15 @@ Hard rules:
   contains a specific, high-information moment, follow the participant's exact
   detail before a generic menu probe. If follow-ups are disabled, proceed to
   the next predefined main question without probing that detail.
+- Before asking a follow-up, name the exact missing evidence to yourself. Ask
+  only if the answer would add something the participant has not already said.
+  If they could answer by repeating a sentence they just gave you, skip that
+  probe or choose a narrower observation, sequence, consequence, contrast, or
+  recurrence question. Do not use "give me an example" when the participant
+  has already supplied a concrete episode.
+- In exploratory interviews, adapt a listed probe to the participant's exact
+  words when that makes it more specific and natural. Keep the listed intent
+  ID in TURN metadata even when the participant-visible wording is adapted.
 - Do not ask a follow-up merely to fill the available budget. Move to the
   next main question when the evidence goal is adequately covered.
 - Ask exactly ONE question per turn, then STOP and wait for the
@@ -1816,6 +1916,9 @@ class EvidenceStateTracker:
         allow_follow_ups: bool = True,
         skip_answered_questions: bool = True,
         allow_coverage_clarifications: bool = False,
+        allow_threading: bool = True,
+        language: str = "en",
+        orchestration_profile: str = "semi_structured",
     ):
         self._questions = questions
         self._closing = closing
@@ -1828,10 +1931,18 @@ class EvidenceStateTracker:
         self._allow_coverage_clarifications = bool(
             allow_coverage_clarifications
         )
+        self._allow_threading = bool(allow_threading)
+        self._language = language or "en"
+        self._orchestration_profile = orchestration_profile
         self._catalog = [
             question_intents(question, index)
             for index, question in enumerate(questions)
         ]
+        self._question_positions = {
+            str(question.get("id")): index
+            for index, question in enumerate(questions)
+            if str(question.get("id") or "").strip()
+        }
         self._valid_evidence = {
             evidence_id
             for catalog in self._catalog
@@ -1861,7 +1972,11 @@ class EvidenceStateTracker:
         self._focused_advances_accepted = 0
         self._probe_policy_corrections = 0
         self._probe_wording_corrections = 0
+        self._adaptive_probe_wording_accepted = 0
         self._emergent_probes_blocked = 0
+        self._answer_repairs_accepted = 0
+        self._answer_repairs_blocked = 0
+        self._clarification_misclassifications_blocked = 0
         self._latest_focal_entity: Optional[str] = None
         self._latest_provenance: Optional[str] = None
 
@@ -1879,6 +1994,22 @@ class EvidenceStateTracker:
 
     def _question_protected(self, index: int) -> bool:
         return bool(self._questions[index].get("always_ask"))
+
+    def _main_asked(self, index: int) -> bool:
+        return str(self._catalog[index]["main"]) in self._asked_intents
+
+    def _blocking_question(self, requested_index: int) -> Optional[int]:
+        """Return the earliest anchor/dependency that must precede a card."""
+        for index in range(0, min(requested_index, len(self._questions))):
+            if self._question_protected(index) and not self._main_asked(index):
+                return index
+        if not 0 <= requested_index < len(self._questions):
+            return None
+        for dependency in self._questions[requested_index].get("depends_on") or []:
+            dependency_index = self._question_positions.get(str(dependency))
+            if dependency_index is not None and not self._main_asked(dependency_index):
+                return dependency_index
+        return None
 
     def _question_skippable(self, index: int) -> bool:
         evidence = set(self._catalog[index]["evidence"])
@@ -1899,7 +2030,13 @@ class EvidenceStateTracker:
         )
 
     def _next_unresolved(self, start: int) -> Optional[int]:
+        blocker = self._blocking_question(min(max(0, start), len(self._questions)))
+        if blocker is not None:
+            return blocker
         for index in range(max(0, start), len(self._questions)):
+            dependency = self._blocking_question(index)
+            if dependency is not None:
+                return dependency
             if self._question_skippable(index):
                 self._covered_questions_skipped += 1
                 continue
@@ -1908,10 +2045,27 @@ class EvidenceStateTracker:
 
     def _peek_next_unresolved(self, start: int) -> Optional[int]:
         """Find the next question without mutating observability counters."""
+        blocker = self._blocking_question(min(max(0, start), len(self._questions)))
+        if blocker is not None:
+            return blocker
         for index in range(max(0, start), len(self._questions)):
+            dependency = self._blocking_question(index)
+            if dependency is not None:
+                return dependency
             if not self._question_skippable(index):
                 return index
         return None
+
+    def safe_next_index(self, start: int) -> Optional[int]:
+        """Public, side-effect-free navigation used by both transports."""
+        if 0 <= start < len(self._questions) and self._main_asked(start):
+            start += 1
+        return self._peek_next_unresolved(start)
+
+    def safe_marker_index(self, requested_index: int) -> int:
+        """Clamp a model marker only at an authored anchor/dependency."""
+        blocker = self._blocking_question(requested_index)
+        return blocker if blocker is not None else requested_index
 
     def _allowed_intents(self, index: int) -> set[str]:
         catalog = self._catalog[index]
@@ -1953,13 +2107,17 @@ class EvidenceStateTracker:
         text: str,
         decision: TurnDecision,
         question_index: int,
+        participant_text: str = "",
     ) -> tuple[str, TurnDecision, bool, Optional[str]]:
         """Bind model-selected follow-ups to the configured probe policy.
 
-        The model is allowed to choose an intent, but a listed intent never
-        gives it permission to silently rewrite that probe. Ordered guides also
-        own the ordering decision. Emergent intent IDs are usable only when the
-        guide explicitly enables them.
+        Ordered and semi-structured guides retain server-owned probe wording.
+        An explicit exploratory profile may adapt a relevance-selected listed
+        probe to a concrete participant detail; this is equivalent to the
+        emergent probing that profile already authorizes.  The adaptation is
+        accepted only when it is short, non-leading, and grounded in the latest
+        answer. Emergent intent IDs are usable only when the guide explicitly
+        enables them.
         """
         if decision.action not in {"probe", "thread"} or not decision.intent:
             return text, decision, False, None
@@ -1993,7 +2151,25 @@ class EvidenceStateTracker:
             if replacement_intent is None:
                 replacement_intent = intent
                 replacement_text = self._listed_probe_text(question_index, intent)
-                if replacement_text != str(text or "").strip():
+                proposed_text = str(text or "").strip()
+                adaptive_wording = (
+                    replacement_text != proposed_text
+                    and self._orchestration_profile == "exploratory"
+                    and self._probe_selection == "relevance"
+                    and self._allow_emergent_follow_ups
+                    and self._adaptive_probe_is_safe(
+                        proposed_text, participant_text
+                    )
+                )
+                if adaptive_wording:
+                    self._adaptive_probe_wording_accepted += 1
+                    self._record_event(
+                        action="accept_adaptive_probe",
+                        question=question_index + 1,
+                        intent=intent,
+                    )
+                    return text, decision, False, None
+                if replacement_text != proposed_text:
                     reason = "listed_probe_wording_corrected"
 
         if replacement_intent is None or replacement_text is None:
@@ -2023,6 +2199,26 @@ class EvidenceStateTracker:
                 accepted_intent=replacement_intent,
             )
         return replacement_text, normalized, changed, reason
+
+    @staticmethod
+    def _adaptive_probe_is_safe(text: str, participant_text: str) -> bool:
+        """Apply a narrow release guard to exploratory probe paraphrases."""
+        cleaned = str(text or "").strip()
+        participant = str(participant_text or "").lower()
+        if (
+            not cleaned
+            or not participant
+            or len(cleaned.split()) > 32
+            or sum(cleaned.count(mark) for mark in _QUESTION_MARKS) != 1
+            or _LEADING_PROBE_RE.search(cleaned)
+        ):
+            return False
+        content_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9']+", cleaned.lower())
+            if len(token) >= 4 and token not in _PROBE_GROUNDING_STOPWORDS
+        }
+        return any(token in participant for token in content_tokens)
 
     def clarification_resume_text(self, index: int) -> str:
         """Return one bounded prompt for a clarification repair."""
@@ -2277,6 +2473,28 @@ class EvidenceStateTracker:
             self._invalid_decisions += 1
 
         if decision.action == "clarify":
+            participant_kind = classify_participant_turn(
+                participant_text, self._language
+            )
+            if participant_kind not in {
+                "procedural",
+                "flow_repair",
+                "clarification",
+                "continuation",
+            }:
+                # The model may not relabel an adequate answer as a request for
+                # clarification. This was the source of exact broad-question
+                # repeats after rhetorical answers ending in a question mark.
+                self._invalid_decisions += 1
+                self._clarification_misclassifications_blocked += 1
+                current_main_asked = (
+                    0 <= current_index < len(self._catalog)
+                    and self._main_asked(current_index)
+                )
+                return self._replacement(
+                    current_index + 1 if current_main_asked else current_index,
+                    "clarify_without_participant_request",
+                )
             anchor_index = (
                 self._pending_thread[0]
                 if self._pending_thread is not None
@@ -2290,6 +2508,14 @@ class EvidenceStateTracker:
                 marker=None,
                 decision=decision,
                 question_index=anchor_index,
+            )
+
+        blocking_question = self._blocking_question(question_index)
+        if blocking_question is not None:
+            self._invalid_decisions += 1
+            self._order_corrections += 1
+            return self._replacement(
+                blocking_question, "unmet_anchor_or_dependency"
             )
 
         intent = decision.intent
@@ -2340,20 +2566,35 @@ class EvidenceStateTracker:
             valid_coverage_repair = (
                 decision.action == "probe"
                 and self._allow_coverage_clarifications
-                and not self._question_protected(question_index)
+                and (
+                    not self._question_protected(question_index)
+                    or (
+                        question_index == current_index
+                        and self._main_asked(question_index)
+                    )
+                )
                 and has_partial_evidence
                 and intent
                 == f"{self._catalog[question_index]['question_id']}:emergent:clarification"
             )
             if not valid_coverage_repair:
                 self._probe_policy_corrections += 1
+                self._answer_repairs_blocked += 1
                 return self._replacement(question_index, "coverage_repair_not_allowed")
+            if intent in self._asked_intents:
+                self._answer_repairs_blocked += 1
+                return self._replacement(
+                    question_index + 1, "coverage_repair_limit_reached"
+                )
+            self._answer_repairs_accepted += 1
 
         policy_replaced = False
         policy_reason: Optional[str] = None
         if decision.action in {"probe", "thread"}:
             text, decision, policy_replaced, policy_reason = (
-                self._normalize_probe_policy(text, decision, question_index)
+                self._normalize_probe_policy(
+                    text, decision, question_index, participant_text
+                )
             )
             intent = decision.intent
             if (
@@ -2463,7 +2704,9 @@ class EvidenceStateTracker:
                 and self._question_resolved(question_index)
             )
             block_reason: Optional[str] = None
-            if self._pending_thread is not None:
+            if not self._allow_threading:
+                block_reason = "threading_disabled"
+            elif self._pending_thread is not None:
                 block_reason = "thread_chain"
             elif current_index in self._threaded_from:
                 block_reason = "thread_limit"
@@ -2710,7 +2953,16 @@ class EvidenceStateTracker:
             "focused_advances_accepted": self._focused_advances_accepted,
             "probe_policy_corrections": self._probe_policy_corrections,
             "probe_wording_corrections": self._probe_wording_corrections,
+            "adaptive_probe_wording_accepted": (
+                self._adaptive_probe_wording_accepted
+            ),
             "emergent_probes_blocked": self._emergent_probes_blocked,
+            "answer_repairs_accepted": self._answer_repairs_accepted,
+            "answer_repairs_blocked": self._answer_repairs_blocked,
+            "clarification_misclassifications_blocked": (
+                self._clarification_misclassifications_blocked
+            ),
+            "orchestration_profile": self._orchestration_profile,
             "asked_intent_count": len(self._asked_intents),
             "tracked_evidence_count": len(self._resolutions),
             "resolved_evidence_count": sum(
@@ -2760,9 +3012,10 @@ class InterviewGuideProcessor(FrameProcessor):
         self._guide = guide or {}
         self._language = language or "en"
         self._questions = list(self._guide.get("questions") or [])
-        self._allow_follow_ups = self._guide.get("allow_follow_ups", True) is not False
-        self._skip_answered_questions = evidence_skipping_enabled(
-            self._guide, self._allow_follow_ups
+        self._orchestration = resolve_orchestration_settings(self._guide)
+        self._allow_follow_ups = bool(self._orchestration["allow_follow_ups"])
+        self._skip_answered_questions = bool(
+            self._orchestration["skip_answered_questions"]
         )
         self._closing = self._guide.get("closing_message", DEFAULT_CLOSING)
         self.current_question_index = 0
@@ -2778,13 +3031,16 @@ class InterviewGuideProcessor(FrameProcessor):
             self._closing,
             probe_selection=self._guide.get("probe_selection", "ordered"),
             allow_emergent_follow_ups=bool(
-                self._guide.get("allow_emergent_follow_ups", False)
+                self._orchestration["allow_emergent_follow_ups"]
             ),
             allow_follow_ups=self._allow_follow_ups,
             skip_answered_questions=self._skip_answered_questions,
-            allow_coverage_clarifications=(
-                self._skip_answered_questions and not self._allow_follow_ups
+            allow_coverage_clarifications=bool(
+                self._orchestration["allow_coverage_clarifications"]
             ),
+            allow_threading=bool(self._orchestration["allow_threading"]),
+            language=self._language,
+            orchestration_profile=str(self._orchestration["profile"]),
         )
         # Bot turns that happen *before* the participant has spoken (the
         # spoken welcome message in particular) used to be counted against
@@ -2832,6 +3088,15 @@ class InterviewGuideProcessor(FrameProcessor):
         if marker is None:
             return
         idx = marker - 1
+        safe_idx = self._evidence.safe_marker_index(idx)
+        if idx > safe_idx:
+            logger.warning(
+                "[guide] blocked marker jump q={} -> q={}; next safe q={}",
+                self.current_question_index + 1,
+                idx + 1,
+                safe_idx + 1,
+            )
+            idx = safe_idx
         if 0 <= idx < len(self._questions) and idx > self.current_question_index:
             logger.debug(
                 "[guide] marker sync q={} -> q={}",
@@ -2938,8 +3203,16 @@ class InterviewGuideProcessor(FrameProcessor):
                 self._closing,
                 probe_selection=self._guide.get("probe_selection", "ordered"),
                 allow_emergent_follow_ups=bool(
-                    self._guide.get("allow_emergent_follow_ups", False)
+                    self._orchestration["allow_emergent_follow_ups"]
                 ),
+                allow_follow_ups=self._allow_follow_ups,
+                skip_answered_questions=self._skip_answered_questions,
+                allow_coverage_clarifications=bool(
+                    self._orchestration["allow_coverage_clarifications"]
+                ),
+                allow_threading=bool(self._orchestration["allow_threading"]),
+                language=self._language,
+                orchestration_profile=str(self._orchestration["profile"]),
             )
 
         # Accumulate user speech so we can tell answers apart from
@@ -2995,7 +3268,14 @@ class InterviewGuideProcessor(FrameProcessor):
                     budget,
                 )
                 if self._bot_turns_on_question >= budget:
-                    self._nudge_pending = True
+                    # repair_only is evidence-state driven: the same model
+                    # turn chooses the next unresolved card and the controller
+                    # validates it. A blind budget nudge on every zero-probe
+                    # question created one forced advance per answer and moved
+                    # the cursor before that answer was classified.
+                    self._nudge_pending = (
+                        self._orchestration["profile"] != "repair_only"
+                    )
 
         # When the user finishes their reply and a nudge is pending, push a
         # system message before the LLM context aggregator triggers a run.
@@ -3097,9 +3377,10 @@ class TextStructuredController:
         guide = guide or {}
         self._questions = list(guide.get("questions") or [])
         self._closing = guide.get("closing_message", DEFAULT_CLOSING)
-        self._allow_follow_ups = guide.get("allow_follow_ups", True) is not False
-        self._skip_answered_questions = evidence_skipping_enabled(
-            guide, self._allow_follow_ups
+        self._orchestration = resolve_orchestration_settings(guide)
+        self._allow_follow_ups = bool(self._orchestration["allow_follow_ups"])
+        self._skip_answered_questions = bool(
+            self._orchestration["skip_answered_questions"]
         )
         self._language = language or "en"
         self.current_question_index = 0
@@ -3117,13 +3398,16 @@ class TextStructuredController:
             self._closing,
             probe_selection=guide.get("probe_selection", "ordered"),
             allow_emergent_follow_ups=bool(
-                guide.get("allow_emergent_follow_ups", False)
+                self._orchestration["allow_emergent_follow_ups"]
             ),
             allow_follow_ups=self._allow_follow_ups,
             skip_answered_questions=self._skip_answered_questions,
-            allow_coverage_clarifications=(
-                self._skip_answered_questions and not self._allow_follow_ups
+            allow_coverage_clarifications=bool(
+                self._orchestration["allow_coverage_clarifications"]
             ),
+            allow_threading=bool(self._orchestration["allow_threading"]),
+            language=self._language,
+            orchestration_profile=str(self._orchestration["profile"]),
         )
         self._last_question_text = (
             str(self._questions[0].get("text") or "").strip()
@@ -3253,6 +3537,15 @@ class TextStructuredController:
         if marker is None:
             return
         idx = marker - 1
+        safe_idx = self._evidence.safe_marker_index(idx)
+        if idx > safe_idx:
+            logger.warning(
+                "[guide:text] blocked marker jump q={} -> q={}; next safe q={}",
+                self.current_question_index + 1,
+                idx + 1,
+                safe_idx + 1,
+            )
+            idx = safe_idx
         if 0 <= idx < len(self._questions) and idx > self.current_question_index:
             logger.debug(
                 "[guide:text] marker sync q={} -> q={}",
@@ -3378,9 +3671,9 @@ class TextStructuredController:
             if clarification_escaped:
                 resume = self._evidence.clarification_resume_text(anchor)
                 reviewed_text = (
-                    f"Let's focus on one part. {resume}"
+                    resume
                     if resume
-                    else "Let's focus on one part at a time."
+                    else "Could you say a little more about what was unclear?"
                 )
                 replaced = True
                 reason = "clarification_advance_blocked"
@@ -3434,7 +3727,9 @@ class TextStructuredController:
             budget,
         )
         if self._bot_turns_on_question >= budget:
-            self._nudge_pending = True
+            self._nudge_pending = (
+                self._orchestration["profile"] != "repair_only"
+            )
 
     def stats(self) -> dict:
         reached = len(self._question_indices_asked)

@@ -172,6 +172,8 @@ export default function InterviewPage() {
   }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const firstPromptSeenRef = useRef(false);
+  const firstAnswerSentRef = useRef(false);
   const micRef = useRef<MicCapture | null>(null);
   const playerRef = useRef<AudioPlayer | null>(null);
   const promptAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -200,13 +202,23 @@ export default function InterviewPage() {
   const micCheckContextRef = useRef<AudioContext | null>(null);
   const micCheckFrameRef = useRef<number | null>(null);
 
+  const recordExperienceEvent = useCallback((event: string, payload: Record<string, unknown> = {}) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "experience_event", event, payload }));
+    }
+  }, []);
+
   useEffect(() => {
     recordingStateRef.current = recordingState;
   }, [recordingState]);
 
   useEffect(() => {
     responseModeRef.current = responseMode;
-  }, [responseMode]);
+    if (status === "active") {
+      recordExperienceEvent("response_mode_changed", { mode: responseMode });
+    }
+  }, [recordExperienceEvent, responseMode, status]);
 
   useEffect(() => {
     agentTypingRef.current = agentTyping;
@@ -458,11 +470,12 @@ export default function InterviewPage() {
 
   const resumeAfterInactivity = useCallback(() => {
     signalParticipantActivity(true);
+    recordExperienceEvent("inactivity_resumed");
     clearInactivityWarning();
     if (responseModeRef.current === "voice") {
       window.setTimeout(() => void startRecordingRef.current?.(), 0);
     }
-  }, [clearInactivityWarning, signalParticipantActivity]);
+  }, [clearInactivityWarning, recordExperienceEvent, signalParticipantActivity]);
 
   const cleanupMicCheck = useCallback(() => {
     if (micCheckFrameRef.current !== null) {
@@ -729,6 +742,8 @@ export default function InterviewPage() {
     setFinishingInterview(false);
     finishingInterviewRef.current = false;
     finishAfterCurrentAnswerRef.current = false;
+    firstPromptSeenRef.current = false;
+    firstAnswerSentRef.current = false;
 
     try {
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -752,6 +767,7 @@ export default function InterviewPage() {
 
       ws.onopen = () => {
         setStatus("active");
+        recordExperienceEvent("connection_opened", { mode: responseModeRef.current });
         const start = Date.now();
         timerRef.current = setInterval(() => {
           setElapsed(Math.floor((Date.now() - start) / 1000));
@@ -774,6 +790,10 @@ export default function InterviewPage() {
                 ...prev,
                 { id: crypto.randomUUID(), role: "agent", text: msg.text, timestamp: new Date() },
               ]);
+              if (!firstPromptSeenRef.current) {
+                firstPromptSeenRef.current = true;
+                recordExperienceEvent("first_prompt_received", { kind: "welcome" });
+              }
               agentTypingRef.current = false;
               setAgentTyping(false);
               if (audioEnabledRef.current && config?.audio_available) {
@@ -792,6 +812,10 @@ export default function InterviewPage() {
               agentTypingRef.current = false;
               setAgentTyping(false);
               if (messageRole === "agent") {
+                if (!firstPromptSeenRef.current) {
+                  firstPromptSeenRef.current = true;
+                  recordExperienceEvent("first_prompt_received", { kind: "question" });
+                }
                 if (audioEnabledRef.current && config?.audio_available) {
                   void playPromptAudio(msg.text);
                 } else if (responseModeRef.current === "voice") {
@@ -886,7 +910,7 @@ export default function InterviewPage() {
       setStatus("error");
       setErrorMsg(err instanceof Error ? err.message : "Failed to start");
     }
-  }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, cleanupConnection, playPromptAudio, releaseTurnMicrophone, showInactivityWarning, clearInactivityWarning, micCheckStatus]);
+  }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, cleanupConnection, playPromptAudio, releaseTurnMicrophone, showInactivityWarning, clearInactivityWarning, micCheckStatus, recordExperienceEvent]);
 
   const sendParticipantText = useCallback((value: string, finishInterview = false) => {
     const text = value.trim();
@@ -897,6 +921,13 @@ export default function InterviewPage() {
         ...prev,
         { id: crypto.randomUUID(), role: "user", text, timestamp: new Date() },
       ]);
+      if (!firstAnswerSentRef.current) {
+        firstAnswerSentRef.current = true;
+        recordExperienceEvent("first_answer_submitted", {
+          mode: responseModeRef.current,
+          word_count: text.split(/\s+/).filter(Boolean).length,
+        });
+      }
     }
     setChatInput("");
     recordingStateRef.current = "idle";
@@ -915,7 +946,7 @@ export default function InterviewPage() {
       wsRef.current.send(JSON.stringify({ type: "message", text }));
     }
     return true;
-  }, [clearInactivityWarning]);
+  }, [clearInactivityWarning, recordExperienceEvent]);
 
   const cancelRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -972,6 +1003,7 @@ export default function InterviewPage() {
         setRecordingState("recording");
       } else if (phase === "ended") {
         endpointFrameRef.current = null;
+        recordExperienceEvent("automatic_endpoint_triggered");
         recorder.stop();
         return;
       }
@@ -980,7 +1012,7 @@ export default function InterviewPage() {
     };
 
     endpointFrameRef.current = requestAnimationFrame(sampleVoiceActivity);
-  }, [signalParticipantActivity]);
+  }, [recordExperienceEvent, signalParticipantActivity]);
 
   const startRecording = useCallback(async () => {
     if (
@@ -1041,6 +1073,7 @@ export default function InterviewPage() {
 
         recordingStateRef.current = "transcribing";
         setRecordingState("transcribing");
+        recordExperienceEvent("transcription_started");
         try {
           const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
           const form = new FormData();
@@ -1054,6 +1087,9 @@ export default function InterviewPage() {
           if (!response.ok) throw new Error(payload.detail || "We could not transcribe that response.");
           const transcript = String(payload.text || "").trim();
           if (!transcript) throw new Error("We could not hear a response. Please try again or type instead.");
+          recordExperienceEvent("transcription_succeeded", {
+            word_count: transcript.split(/\s+/).filter(Boolean).length,
+          });
           const shouldFinishInterview = finishAfterCurrentAnswerRef.current;
           finishAfterCurrentAnswerRef.current = false;
           if (!sendParticipantText(transcript, shouldFinishInterview)) {
@@ -1065,6 +1101,9 @@ export default function InterviewPage() {
             setRecordingError("Your transcript is ready, but the connection is not. Please send it when the interview reconnects.");
           }
         } catch (error) {
+          recordExperienceEvent("transcription_failed", {
+            message: error instanceof Error ? error.message : "unknown",
+          });
           if (finishAfterCurrentAnswerRef.current) {
             finishAfterCurrentAnswerRef.current = false;
             recordingStateRef.current = "idle";
@@ -1102,7 +1141,7 @@ export default function InterviewPage() {
           : "We could not start the microphone. Please try again or type instead."
       );
     }
-  }, [cleanupTurnRecording, releaseTurnMicrophone, sendParticipantText, startEndpointMonitor, widgetKey]);
+  }, [cleanupTurnRecording, recordExperienceEvent, releaseTurnMicrophone, sendParticipantText, startEndpointMonitor, widgetKey]);
 
   startRecordingRef.current = startRecording;
 
@@ -1123,6 +1162,10 @@ export default function InterviewPage() {
 
   const confirmFinishInterview = useCallback(() => {
     setFinishDialogOpen(false);
+    recordExperienceEvent("finish_requested", {
+      recording_state: recordingStateRef.current,
+      elapsed_seconds: elapsed,
+    });
     stopPromptAudio();
 
     // Preserve a spoken answer already in progress: finish capture, transcribe
@@ -1148,7 +1191,7 @@ export default function InterviewPage() {
     cleanupConnection();
     setEndedReason("user_stopped");
     setStatus("ended");
-  }, [chatInput, cleanupConnection, isTextChat, sendParticipantText, stopPromptAudio]);
+  }, [chatInput, cleanupConnection, elapsed, isTextChat, recordExperienceEvent, sendParticipantText, stopPromptAudio]);
 
   const handleAudioToggle = useCallback(() => {
     const next = !audioEnabled;

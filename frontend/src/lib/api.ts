@@ -205,12 +205,14 @@ export interface InterviewQuestionConfig {
   visit_scope?: "all" | "first_time" | "returning";
   skip_remaining_module_if_not_applicable?: boolean;
   always_ask?: boolean;
+  depends_on?: string[];
   role_variants?: Record<string, string | { text?: string; probes?: string[] }>;
   returning_role_variants?: Record<string, string | { text?: string; probes?: string[] }>;
 }
 
 export interface InterviewGuideConfig {
   questions: InterviewQuestionConfig[];
+  orchestration_profile?: "fixed" | "repair_only" | "semi_structured" | "exploratory" | null;
   closing_message: string | null;
   allow_follow_ups?: boolean;
   skip_answered_questions?: boolean | null;

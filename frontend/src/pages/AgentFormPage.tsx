@@ -56,12 +56,15 @@ interface InterviewQuestion {
   priority: "required" | "optional";
   sensitivity: "standard" | "elevated";
   always_ask: boolean;
+  depends_on: string[];
 }
 
 type ProbeSelection = "ordered" | "relevance";
+type OrchestrationProfile = "fixed" | "repair_only" | "semi_structured" | "exploratory";
 
 interface InterviewGuide {
   questions: InterviewQuestion[];
+  orchestration_profile: OrchestrationProfile;
   closing_message: string;
   allow_follow_ups: boolean;
   skip_answered_questions: boolean;
@@ -83,7 +86,33 @@ const EMPTY_QUESTION: InterviewQuestion = {
   priority: "required",
   sensitivity: "standard",
   always_ask: false,
+  depends_on: [],
 };
+
+const ORCHESTRATION_RULES: Record<OrchestrationProfile, Pick<InterviewGuide,
+  "allow_follow_ups" | "skip_answered_questions" | "allow_emergent_follow_ups">> = {
+  fixed: { allow_follow_ups: false, skip_answered_questions: false, allow_emergent_follow_ups: false },
+  repair_only: { allow_follow_ups: false, skip_answered_questions: true, allow_emergent_follow_ups: false },
+  semi_structured: { allow_follow_ups: true, skip_answered_questions: true, allow_emergent_follow_ups: false },
+  exploratory: { allow_follow_ups: true, skip_answered_questions: true, allow_emergent_follow_ups: true },
+};
+
+function inferOrchestrationProfile(g: Partial<InterviewGuide> | null | undefined): OrchestrationProfile {
+  if (g?.orchestration_profile && g.orchestration_profile in ORCHESTRATION_RULES) {
+    return g.orchestration_profile;
+  }
+  const hasCapacity = (g?.questions || []).some((question) =>
+    (question.max_follow_ups || 0) > 0
+    && ((question.probes || []).length > 0 || g?.allow_emergent_follow_ups));
+  if (g?.allow_follow_ups === false || !hasCapacity) {
+    return g?.skip_answered_questions === true ? "repair_only" : "fixed";
+  }
+  return g?.allow_emergent_follow_ups ? "exploratory" : "semi_structured";
+}
+
+function applyOrchestrationProfile(g: InterviewGuide, profile: OrchestrationProfile): InterviewGuide {
+  return { ...g, orchestration_profile: profile, ...ORCHESTRATION_RULES[profile] };
+}
 
 /**
  * Fill in defaults for an interview guide loaded from the API or an imported
@@ -91,6 +120,7 @@ const EMPTY_QUESTION: InterviewQuestion = {
  * (the prior behaviour).
  */
 function withGuideDefaults(g: Partial<InterviewGuide> | null | undefined): InterviewGuide {
+  const profile = inferOrchestrationProfile(g);
   return {
     questions: (g?.questions ?? []).map((question) => ({
       ...EMPTY_QUESTION,
@@ -99,13 +129,13 @@ function withGuideDefaults(g: Partial<InterviewGuide> | null | undefined): Inter
       target_ids: question.target_ids ?? [],
       evidence_goal: question.evidence_goal ?? [],
       do_not_assume: question.do_not_assume ?? [],
+      depends_on: question.depends_on ?? [],
     })),
     closing_message:
       g?.closing_message ?? "Thank you for your time. This concludes our interview.",
-    allow_follow_ups: g?.allow_follow_ups ?? true,
-    skip_answered_questions: g?.skip_answered_questions ?? (g?.allow_follow_ups ?? true),
+    orchestration_profile: profile,
+    ...ORCHESTRATION_RULES[profile],
     probe_selection: g?.probe_selection === "relevance" ? "relevance" : "ordered",
-    allow_emergent_follow_ups: g?.allow_emergent_follow_ups ?? false,
   };
 }
 
@@ -125,6 +155,7 @@ function downloadFile(content: string, filename: string, mime: string) {
 
 function generateGuideJSONTemplate(): string {
   const template: InterviewGuide = {
+    orchestration_profile: "semi_structured",
     questions: [
       {
         ...EMPTY_QUESTION,
@@ -240,6 +271,7 @@ function parseGuideCSV(content: string): InterviewGuide {
   if (questions.length === 0) throw new Error("No valid questions found in CSV.");
   return {
     questions,
+    orchestration_profile: "semi_structured",
     closing_message: closingMessage,
     allow_follow_ups: true,
     skip_answered_questions: true,
@@ -281,11 +313,12 @@ function parseGuideJSON(content: string): InterviewGuide {
         priority: q.priority === "optional" ? "optional" : "required",
         sensitivity: q.sensitivity === "elevated" ? "elevated" : "standard",
         always_ask: q.always_ask === true,
+        depends_on: Array.isArray(q.depends_on) ? q.depends_on.filter((item): item is string => typeof item === "string") : [],
       };
     }
   );
 
-  return {
+  const rawGuide: Partial<InterviewGuide> = {
     questions,
     closing_message:
       typeof obj.closing_message === "string"
@@ -296,6 +329,12 @@ function parseGuideJSON(content: string): InterviewGuide {
     probe_selection: obj.probe_selection === "relevance" ? "relevance" : "ordered",
     allow_emergent_follow_ups: obj.allow_emergent_follow_ups === true,
   };
+  return withGuideDefaults({
+    ...rawGuide,
+    orchestration_profile: typeof obj.orchestration_profile === "string"
+      ? obj.orchestration_profile as OrchestrationProfile
+      : undefined,
+  });
 }
 
 function buildAgentConfigJSON(form: FormData): string {
@@ -562,6 +601,7 @@ Important: Adapt your style to the communication channel. For voice interviews, 
   interview_mode: "free_form",
   interview_guide: {
     questions: [],
+    orchestration_profile: "semi_structured",
     closing_message: "Thank you for your time. This concludes our interview.",
     allow_follow_ups: true,
     skip_answered_questions: true,
@@ -1617,43 +1657,26 @@ export default function AgentFormPage() {
                 deeper answers or must use only the predefined questions.
               </p>
 
-              <label className="flex items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={form.interview_guide.allow_follow_ups}
+              <label className="block rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3">
+                <span className="block text-xs font-medium text-gray-800">Interview behavior</span>
+                <select
+                  className="select-styled mt-2 w-full bg-white text-sm"
+                  value={form.interview_guide.orchestration_profile}
                   onChange={(e) => setForm((f) => ({
                     ...f,
-                    interview_guide: {
-                      ...f.interview_guide,
-                      allow_follow_ups: e.target.checked,
-                    },
+                    interview_guide: applyOrchestrationProfile(
+                      f.interview_guide,
+                      e.target.value as OrchestrationProfile,
+                    ),
                   }))}
-                />
-                <span>
-                  <span className="block text-xs font-medium text-gray-800">Allow follow-up questions</span>
-                  <span className="block text-[11px] text-gray-500 mt-0.5 leading-relaxed">
-                    Turn this off for a fixed survey. The interviewer will ask only the predefined main questions in order and ignore all probe settings.
-                  </span>
-                </span>
-              </label>
-
-              <label className="flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={form.interview_guide.skip_answered_questions}
-                  onChange={(e) => setForm((f) => ({
-                    ...f,
-                    interview_guide: {
-                      ...f.interview_guide,
-                      skip_answered_questions: e.target.checked,
-                    },
-                  }))}
-                />
-                <span>
-                  <span className="block text-xs font-medium text-gray-800">Skip questions already answered</span>
-                  <span className="block text-[11px] text-gray-500 mt-0.5 leading-relaxed">Independent of exploratory follow-ups. Only fully covered cards may be skipped; protect task or module anchors per question.</span>
+                >
+                  <option value="fixed">Fixed — exact questions, no skipping</option>
+                  <option value="repair_only">Quality control — skip covered cards, one narrow repair</option>
+                  <option value="semi_structured">Semi-structured — authored probes only</option>
+                  <option value="exploratory">Exploratory — authored and bounded emergent probes</option>
+                </select>
+                <span className="block text-[11px] text-gray-500 mt-2 leading-relaxed">
+                  One policy controls follow-ups, evidence-based skipping, and threading so incompatible settings cannot be saved.
                 </span>
               </label>
 
@@ -1704,25 +1727,6 @@ export default function AgentFormPage() {
                   })}
                 </div>
               </div>}
-
-              {form.interview_guide.allow_follow_ups && <label className="flex items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={form.interview_guide.allow_emergent_follow_ups}
-                  onChange={(e) => setForm((f) => ({
-                    ...f,
-                    interview_guide: {
-                      ...f.interview_guide,
-                      allow_emergent_follow_ups: e.target.checked,
-                    },
-                  }))}
-                />
-                <span>
-                  <span className="block text-xs font-medium text-gray-800">Allow bounded emergent probes</span>
-                  <span className="block text-[11px] text-gray-500 mt-0.5 leading-relaxed">When no listed probe fits and an evidence goal is still open, the interviewer may create one neutral, answer-grounded clarification, description, meaning, consequence, contrast, or source probe. The same follow-up cap still applies.</span>
-                </span>
-              </label>}
 
               {/* ── Guide upload/download bar ── */}
               <div className="flex items-center justify-between rounded-xl bg-gray-50 border border-gray-100 px-4 py-3">
@@ -2026,6 +2030,9 @@ export default function AgentFormPage() {
                       </div>
                       <label className="block text-xs text-gray-600">Purpose <span className="text-gray-400">(private stage direction)</span>
                         <textarea className="input-styled w-full mt-1 min-h-16 text-xs" value={q.purpose} onChange={(e) => setForm((f) => { const qs = [...f.interview_guide.questions]; qs[qi] = { ...qs[qi], purpose: e.target.value }; return { ...f, interview_guide: { ...f.interview_guide, questions: qs } }; })} placeholder="Why this question is here and how it supports the research decision." />
+                      </label>
+                      <label className="block text-xs text-gray-600">Depends on question IDs <span className="text-gray-400">(one per line)</span>
+                        <textarea className="input-styled w-full mt-1 min-h-16 font-mono text-xs" value={q.depends_on.join("\n")} onChange={(e) => setForm((f) => { const qs = [...f.interview_guide.questions]; qs[qi] = { ...qs[qi], depends_on: e.target.value.split("\n").map((item) => item.trim()).filter(Boolean) }; return { ...f, interview_guide: { ...f.interview_guide, questions: qs } }; })} placeholder="consequential_task" />
                       </label>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <label className="text-xs text-gray-600">Evidence goal <span className="text-gray-400">(one per line)</span>
