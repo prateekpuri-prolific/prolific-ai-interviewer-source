@@ -4,9 +4,11 @@ OASIS — FastAPI application entry point.
 
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
+from uuid import UUID
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -21,7 +23,9 @@ from app.api.monitor import router as monitor_router
 from app.api.twilio import router as twilio_router
 from app.config import settings
 from app.database import engine, get_db
+from app.privacy import redact_text
 from app.redis import close_redis, get_redis
+from app.research.participant_feedback import valid_participant_feedback_token
 
 
 @asynccontextmanager
@@ -31,16 +35,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.session_manager import session_cleanup_loop
 
     # ── Startup ──
+    from app.privacy_logging import configure_privacy_logging
+    configure_privacy_logging()
     # Verify Redis is reachable
     redis = await get_redis()
     await redis.ping()
 
     # Start background session cleanup loop
     cleanup_task = asyncio.create_task(session_cleanup_loop(interval_seconds=60))
+    retention_task = None
+    if settings.privacy_retention_enabled:
+        from app.privacy_lifecycle import retention_loop
+        retention_task = asyncio.create_task(retention_loop())
 
     yield
 
     # ── Shutdown ──
+    if retention_task:
+        retention_task.cancel()
+        try:
+            await retention_task
+        except asyncio.CancelledError:
+            pass
     cleanup_task.cancel()
     try:
         await cleanup_task
@@ -90,6 +106,22 @@ class WidgetSpeechRequest(BaseModel):
         if not value:
             raise ValueError("Text must not be blank")
         return value
+
+
+class WidgetFeedbackRequest(BaseModel):
+    """Small optional UX survey; never appended to the transcript."""
+
+    token: str = Field(..., min_length=32, max_length=128)
+    naturalness_rating: int = Field(..., ge=1, le=5)
+    repeated_questions: bool
+    technical_issues: bool
+    comments: str | None = Field(None, max_length=1000)
+
+    @field_validator("comments")
+    @classmethod
+    def _strip_comments(cls, value: str | None) -> str | None:
+        cleaned = str(value or "").strip()
+        return cleaned or None
 
 
 # ── Public Widget Config (no auth required) ──────────────────
@@ -179,6 +211,53 @@ async def widget_config(widget_key: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+@app.post(
+    "/api/widget/{widget_key}/sessions/{session_id}/feedback",
+    tags=["widget"],
+)
+async def submit_widget_feedback(
+    widget_key: str,
+    session_id: UUID,
+    body: WidgetFeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Store optional participant feedback after a committed interview."""
+    from app.models.agent import Agent
+    from app.models.session import Session, SessionStatus
+
+    result = await db.execute(select(Agent).where(Agent.widget_key == widget_key))
+    agent = result.scalar_one_or_none()
+    session = await db.get(Session, session_id)
+    if not agent or not session or session.agent_id != agent.id:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    if not valid_participant_feedback_token(body.token, widget_key, session_id):
+        raise HTTPException(status_code=403, detail="Invalid feedback token")
+    status = session.status.value if hasattr(session.status, "value") else session.status
+    if status == SessionStatus.ACTIVE.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Feedback is available after the interview ends",
+        )
+
+    feedback = {
+        "survey_version": "participant_experience_v1",
+        "naturalness_rating": body.naturalness_rating,
+        "repeated_questions": body.repeated_questions,
+        "technical_issues": body.technical_issues,
+        "comments": redact_text(body.comments or "").text or None,
+    }
+    # Identical retries are safe; a materially different second write is not.
+    if session.post_interview_feedback is not None:
+        if session.post_interview_feedback == feedback:
+            return {"submitted": True, "already_submitted": True}
+        raise HTTPException(status_code=409, detail="Feedback was already submitted")
+
+    session.post_interview_feedback = feedback
+    session.post_interview_feedback_submitted_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"submitted": True, "already_submitted": False}
+
+
 @app.post("/api/widget/{widget_key}/speech", tags=["widget"])
 async def widget_speech(
     widget_key: str,
@@ -224,7 +303,7 @@ async def widget_speech(
 @app.post("/api/widget/{widget_key}/transcribe", tags=["widget"])
 async def widget_transcribe(
     widget_key: str,
-    audio: UploadFile = File(...),
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Transcribe one participant voice answer without storing the audio."""
@@ -241,23 +320,16 @@ async def widget_transcribe(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found or inactive")
 
-    content_type = (audio.content_type or "").lower()
-    if content_type and not (content_type.startswith("audio/") or content_type == "video/webm"):
-        raise HTTPException(status_code=415, detail="Please upload an audio recording")
-
-    content = await audio.read(25 * 1024 * 1024 + 1)
-    if not content:
-        raise HTTPException(status_code=400, detail="The recording was empty")
-    if len(content) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="The recording is too large")
+    from app.audio.transient_upload import read_transient_audio
+    content, filename, content_type = await read_transient_audio(request)
 
     try:
         transcript = await transcribe_audio(
             provider=agent.stt_provider,
             model=agent.stt_model,
             audio=content,
-            filename=audio.filename,
-            content_type=audio.content_type,
+            filename=filename,
+            content_type=content_type,
             language=agent.language,
         )
     except ValueError as exc:

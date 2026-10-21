@@ -134,6 +134,11 @@ async def update_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     update_data = payload.model_dump(exclude_unset=True)
+    merged_guide = update_data.get("interview_guide", agent.interview_guide) or {}
+    if merged_guide.get("conversation_policy"):
+        if (update_data.get("modality", agent.modality) != "text"
+                or update_data.get("interview_mode", agent.interview_mode) != "structured"):
+            raise HTTPException(status_code=422, detail="contextual_v1 requires a structured text agent")
     config_fields = (
         "modality",
         "pipeline_type",

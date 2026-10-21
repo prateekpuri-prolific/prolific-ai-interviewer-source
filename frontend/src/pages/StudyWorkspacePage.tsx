@@ -103,6 +103,7 @@ const resolvedProfile = (guide: InterviewGuideConfig): OrchestrationProfile => {
 
 const withProfile = (guide: InterviewGuideConfig, profile: OrchestrationProfile): InterviewGuideConfig => ({
   ...guide,
+  conversation_policy: profile === "exploratory" ? guide.conversation_policy : null,
   orchestration_profile: profile,
   ...orchestrationRules[profile],
 });
@@ -574,7 +575,7 @@ export default function StudyWorkspacePage() {
       const [savedStudy, savedAgent] = await Promise.all([
         studies.update(studyId, { title: draft.title, description: draft.description, research_spec: nextSpec }),
         agents.update(studyId, agentId, {
-          modality: "voice",
+          modality: agent?.modality || "voice",
           pipeline_type: "modular",
           interview_mode: "structured",
           system_prompt: draft.systemPrompt,
@@ -582,7 +583,7 @@ export default function StudyWorkspacePage() {
           interview_guide: nextGuide,
           widget_title: draft.title,
           widget_description: nextSpec.participant_information.purpose_summary || draft.description,
-          widget_show_progress: true,
+          widget_show_progress: agent?.widget_show_progress ?? true,
           // This is the participant-facing target. Runtime orchestration adds
           // a bounded grace period instead of advertising a shorter duration.
           max_duration_seconds: Math.max(300, draft.estimatedMinutes * 60),

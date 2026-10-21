@@ -4,6 +4,7 @@ from app.models.agent import Agent, AgentModality, AgentStatus, InterviewMode, P
 from app.models.session import Session, SessionStatus, TranscriptEntry, SpeakerRole
 from app.models.engagement import EngagementTurn, EngagementEvent, AdaptiveAction
 from app.models.knowledge import KnowledgeDocument, KnowledgeChunk
+from app.models.privacy_lifecycle import PrivacyLifecyclePolicy, PrivacyDeletionReceipt
 
 __all__ = [
     "Base",

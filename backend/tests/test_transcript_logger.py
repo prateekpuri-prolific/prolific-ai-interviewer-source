@@ -8,7 +8,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pipecat.frames.frames import LLMFullResponseEndFrame, TextFrame
+from pipecat.frames.frames import LLMFullResponseEndFrame, TextFrame, TranscriptionFrame
 from pipecat.processors.frame_processor import FrameDirection
 
 from app.pipeline.transcript_logger import (
@@ -104,6 +104,33 @@ class TestTranscriptLogger:
         # Should not raise
         await state.persist_entry("user", "Test")
         await state.drain()
+
+    async def test_user_pii_is_redacted_before_storage_notification_and_forwarding(self):
+        callback = AsyncMock()
+        state, mock_session = self._make_state(notify_callback=callback)
+        capture = TranscriptUserCapture(state=state)
+        capture.push_frame = AsyncMock()
+        secret = "person@example.com"
+
+        await capture.process_frame(
+            TranscriptionFrame(
+                text=f"Please email {secret}", user_id="u", timestamp="t",
+                result={"transcript": secret},
+            ),
+            FrameDirection.DOWNSTREAM,
+        )
+        await state.drain()
+
+        stored = mock_session.add.call_args[0][0]
+        forwarded = capture.push_frame.call_args[0][0]
+        assert secret not in stored.content
+        assert secret not in forwarded.text
+        assert forwarded.result is None
+        assert any(
+            call.args[0].get("type") == "privacy_warning"
+            for call in callback.await_args_list
+        )
+        assert all(secret not in str(call.args[0]) for call in callback.await_args_list)
 
     async def test_cleanup_flushes_buffer(self):
         logger, state, mock_session = self._make_logger()

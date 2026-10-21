@@ -60,6 +60,22 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = ""
     cartesia_api_key: str = ""
 
+    # Structured-interview evidence is graded independently from the
+    # conversational moderator. Failures are conservative: no new evidence is
+    # accepted, so the participant may see a redundant question rather than an
+    # unsupported skip.
+    evidence_judge_enabled: bool = True
+    evidence_judge_model: str = "gpt-5.6-terra"
+
+    # Contextual privacy is a second layer after deterministic local redaction.
+    # The model receives only locally minimised text and its response is not
+    # stored provider-side. A failed configured check withholds the utterance.
+    privacy_llm_enabled: bool = True
+    # Explicit infrastructure opt-in, in addition to each study's owned policy.
+    privacy_retention_enabled: bool = False
+    privacy_llm_model: str = "gpt-4o-mini"
+    privacy_llm_timeout_seconds: float = 6.0
+
     # ── OpenAI data-residency (EU regional API) ──
     # When OPENAI_USE_EU=true, all calls to OpenAI (chat, realtime, STT, TTS,
     # embeddings) are routed through https://eu.api.openai.com instead of the

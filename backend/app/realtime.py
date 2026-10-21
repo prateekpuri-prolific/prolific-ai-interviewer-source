@@ -27,7 +27,7 @@ async def publish_transcript_event(session_id: str, payload: dict[str, Any]) -> 
     try:
         await redis.publish(channel, json.dumps(payload))
     except Exception as exc:
-        logger.warning(f"Failed to publish transcript event: {exc}")
+        logger.warning(f"Failed to publish transcript event: {type(exc).__name__}")
 
 
 async def subscribe_transcript(session_id: str):

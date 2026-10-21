@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.engagement import EngagementEvent, EngagementTurn
@@ -41,6 +42,14 @@ async def session_with_transcript(db_session: AsyncSession, study_agent, client)
         participant_id="test-p-001",
         duration_seconds=120.5,
         ended_at=datetime.now(timezone.utc),
+        post_interview_feedback={
+            "survey_version": "participant_experience_v1",
+            "naturalness_rating": 4,
+            "repeated_questions": False,
+            "technical_issues": True,
+            "comments": "One microphone retry.",
+        },
+        post_interview_feedback_submitted_at=datetime.now(timezone.utc),
     )
     db_session.add(session)
     await db_session.flush()
@@ -143,6 +152,8 @@ class TestSessionsAPI:
         content = resp.text
         assert "session_id" in content  # Header row
         assert "Hello! Thank you for joining." in content
+        assert "post_interview_naturalness_rating" in content
+        assert "One microphone retry." in content
 
     async def test_export_json(self, client: AsyncClient, session_with_transcript):
         study_id, agent_id, _ = session_with_transcript
@@ -155,6 +166,40 @@ class TestSessionsAPI:
         assert len(data) >= 1
         assert "transcript" in data[0]
         assert len(data[0]["transcript"]) == 3
+        assert data[0]["post_interview_feedback"]["naturalness_rating"] == 4
+
+    async def test_legacy_unredacted_content_is_protected_at_read_and_export(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        session_with_transcript,
+    ):
+        study_id, agent_id, session_id = session_with_transcript
+        entry = await db_session.scalar(
+            select(TranscriptEntry).where(
+                TranscriptEntry.session_id == uuid.UUID(session_id),
+                TranscriptEntry.role == SpeakerRole.USER,
+            )
+        )
+        entry.content = "Contact me at legacy@example.com"
+        await db_session.commit()
+
+        detail = await client.get(
+            f"/api/studies/{study_id}/agents/{agent_id}/sessions/{session_id}"
+        )
+        csv_export = await client.get(
+            f"/api/studies/{study_id}/agents/{agent_id}/sessions/export/csv"
+        )
+        json_export = await client.get(
+            f"/api/studies/{study_id}/agents/{agent_id}/sessions/export/json"
+        )
+
+        assert "legacy@example.com" not in detail.text
+        assert "legacy@example.com" not in csv_export.text
+        assert "legacy@example.com" not in json_export.text
+        assert "[EMAIL]" in detail.text
+        assert "[EMAIL]" in csv_export.text
+        assert "[EMAIL]" in json_export.text
 
 
 @pytest.fixture

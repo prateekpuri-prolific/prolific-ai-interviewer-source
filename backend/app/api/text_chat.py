@@ -17,6 +17,7 @@ import json
 import secrets
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -39,12 +40,19 @@ from app.models.study import Study
 from app.realtime import publish_transcript_event
 from app.providers.catalog import resolve_llm_api_kind
 from app.providers.validate import validate_agent_pipeline_config
+from app.privacy import (
+    PRIVACY_WARNING,
+    redact_session_data,
+    redact_text,
+    redact_text_with_llm,
+)
 from app.research.protocol import (
     build_protocol_snapshot,
     build_research_context,
     consent_required,
     participant_information,
 )
+from app.research.participant_feedback import participant_feedback_token
 from app.session_manager import register_session, unregister_session
 
 router = APIRouter()
@@ -53,6 +61,7 @@ _MAX_CHAT_DURATION = 7200  # 2 hours absolute ceiling
 _KEEPALIVE_INTERVAL = 20  # seconds between keepalive pings
 _INACTIVITY_WARNING_SECONDS = 60
 _INACTIVITY_CLOSE_GRACE_SECONDS = 60
+_EVIDENCE_JUDGE_TIMEOUT_SECONDS = 20
 _PARTICIPANT_EXPERIENCE_EVENTS = {
     "connection_opened",
     "first_prompt_received",
@@ -92,6 +101,19 @@ async def _openai_use_eu() -> bool:
 async def _openai_api_base() -> str | None:
     """LiteLLM api_base for OpenAI chat models, or None for the default region."""
     return _OPENAI_EU_BASE_URL if await _openai_use_eu() else None
+
+
+async def _redact_participant_text(value: str):
+    """Run local minimisation and the configured contextual privacy layer."""
+    if not settings.privacy_llm_enabled:
+        return redact_text(value)
+    return await redact_text_with_llm(
+        value,
+        api_key=await _get_key("openai_api_key"),
+        model=settings.privacy_llm_model,
+        api_base=await _openai_api_base(),
+        timeout_seconds=settings.privacy_llm_timeout_seconds,
+    )
 
 
 _REALTIME_TO_CHAT: dict[str, str] = {
@@ -190,7 +212,7 @@ async def _maybe_inject_rag_context(
         return augmented
 
     except Exception as exc:
-        logger.warning(f"Text-chat RAG lookup failed (non-fatal): {exc}")
+        logger.warning(f"Text-chat RAG lookup failed (non-fatal): {type(exc).__name__}")
         return messages
 
 
@@ -346,6 +368,164 @@ async def _call_llm(
     }
 
 
+async def _judge_structured_turn(
+    controller,
+    *,
+    participant_text: str,
+    participant_sequence: int,
+) -> dict[str, object]:
+    """Run one independent batched judge and stage its authoritative state.
+
+    A judge failure still stages an empty authoritative result. The moderator's
+    own coverage claims are therefore ignored instead of becoming an unsafe
+    fallback that could skip an unanswered card.
+    """
+    from app.pipeline.conversation_policy import ContextualInterviewController, observe_conversation
+    if isinstance(controller, ContextualInterviewController):
+        try:
+            observation, usage = await asyncio.wait_for(observe_conversation(
+                api_key=await _get_key("openai_api_key"), api_base=await _openai_api_base(),
+                model=settings.evidence_judge_model, payload=controller.observer_context(),
+            ), timeout=_EVIDENCE_JUDGE_TIMEOUT_SECONDS)
+            controller.apply_observation(observation)
+            return {"authoritative": True, "control_note": controller.authoritative_model_note(),
+                    **usage, "candidate_count": controller.total_questions,
+                    "returned_count": len(observation.updates), "failed": False}
+        except Exception as exc:
+            logger.warning("Conversation observer unavailable: {}", type(exc).__name__)
+            controller.observation_failed()
+            return {"authoritative": True, "control_note": controller.authoritative_model_note(),
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "candidate_count": controller.total_questions, "returned_count": 0, "failed": True}
+    model = str(settings.evidence_judge_model or "gpt-5.6-terra").strip()
+    empty = {
+        "resolutions": {},
+        "evidence_sources": {},
+        "missing_facets": {},
+        "confidences": {},
+    }
+    try:
+        api_key = await _get_key("openai_api_key")
+        if not api_key:
+            raise ValueError("OpenAI API key is unavailable")
+        from app.pipeline.evidence_judge import judge_evidence
+
+        result = await asyncio.wait_for(
+            judge_evidence(
+                api_key=api_key,
+                api_base=await _openai_api_base(),
+                model=model,
+                latest_response=participant_text,
+                context=controller.evidence_judge_context(participant_text),
+            ),
+            timeout=_EVIDENCE_JUDGE_TIMEOUT_SECONDS,
+        )
+        controller.prepare_external_judgment(
+            participant_text,
+            participant_sequence,
+            resolutions=result.resolutions,
+            evidence_sources=result.evidence_sources,
+            missing_facets=result.missing_facets,
+            confidences=result.confidences,
+            judge_model=model,
+        )
+        return {
+            "authoritative": True,
+            "control_note": controller.authoritative_model_note(),
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "candidate_count": result.candidate_count,
+            "returned_count": result.returned_count,
+            "failed": False,
+        }
+    except Exception as exc:
+        logger.warning(
+            "Evidence judge failed; accepting no new evidence: {}",
+            type(exc).__name__,
+        )
+        controller.prepare_external_judgment(
+            participant_text,
+            participant_sequence,
+            **empty,
+            judge_model=model,
+            failed=True,
+        )
+        return {
+            "authoritative": True,
+            "control_note": controller.authoritative_model_note(),
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "candidate_count": len(
+                controller.evidence_judge_context(participant_text).get("candidates") or []
+            ),
+            "returned_count": 0,
+            "failed": True,
+        }
+
+
+async def _contextual_agent_turn(controller, messages, *, model, study_id, participant_text):
+    """Generate, semantically check and repair once before delivering a turn."""
+    from app.pipeline.conversation_policy import ConversationRepair, check_question
+    from app.pipeline.interview_guide import strip_control_markers, control_marker_prefix
+
+    # Replace transient server state rather than accumulating stale decisions.
+    context = [m for m in messages if not str(m.get("content", "")).startswith("[CONVERSATION STATE")]
+    context = context + [{"role": "system", "content": controller.authoritative_model_note()}]
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    last_issue = "generation_failed"
+    review = None
+    repeated_anchor = None
+    for attempt in range(2):
+        raw = ""
+        try:
+            result = await _call_llm(context, model=model, study_id=study_id)
+            for key in usage:
+                usage[key] += result.get(key, 0)
+            raw = result["content"]
+            text, marker, decision = strip_control_markers(raw)
+            text = text.strip()
+            move = controller.validate_turn(text, decision, participant_text)
+            if decision.action not in {"close", "clarify"}:
+                check, check_usage = await asyncio.wait_for(check_question(
+                    api_key=await _get_key("openai_api_key"), api_base=await _openai_api_base(),
+                    model=settings.evidence_judge_model,
+                    payload=controller.question_check_context(text, move),
+                ), timeout=_EVIDENCE_JUDGE_TIMEOUT_SECONDS)
+                for key in usage:
+                    usage[key] += check_usage[key]
+                approved_scope = (decision.action == "main" and check.issue == "wrong_purpose"
+                                  and " ".join(text.split()) == " ".join(move["wording"].split()))
+                if approved_scope:
+                    controller.events.append({"action": "critic_scope_override",
+                                              "reason": "approved_anchor_can_cover_part_of_topic",
+                                              "proposed_text": text})
+                elif not check.acceptable or check.issue != "none":
+                    controller.record_rejection(text, check.issue, check.correction)
+                    if move["action"] == "main" and check.issue == "already_answered":
+                        repeated_anchor = move
+                    controller.defer_rejected_anchor(move, check.issue)
+                    raise ConversationRepair(check.correction or check.issue)
+            review = controller.accept_turn(text, decision, move)
+            break
+        except Exception as exc:
+            last_issue = str(exc) if isinstance(exc, ConversationRepair) else type(exc).__name__
+            if not isinstance(exc, ConversationRepair):
+                logger.warning("Contextual turn unavailable: {}", type(exc).__name__)
+            controller.events.append({"action": "repair_attempt", "attempt": attempt + 1,
+                                      "reason": last_issue, "proposed_text": raw})
+            if raw:
+                context.append({"role": "assistant", "content": raw})
+            context.append({"role": "system", "content": "The proposed turn was NOT delivered. "
+                            "Repair it once using an eligible move. " + last_issue})
+            context.append({"role": "system", "content": controller.authoritative_model_note()})
+    if review is None:
+        if repeated_anchor:
+            controller.defer_rejected_anchor(repeated_anchor, "already_answered", final=True)
+        review = controller.fallback_turn(last_issue)
+    return {"content": control_marker_prefix(review.marker, review.decision) + " " + review.text,
+            **usage}, review
+
+
 async def _keepalive_loop(ws: WebSocket, stop: asyncio.Event) -> None:
     """Send periodic pings to prevent idle-timeout disconnections (e.g. iOS Safari)."""
     while not stop.is_set():
@@ -403,6 +583,15 @@ async def _send_scripted_agent_turn(
         "role": "agent",
     })
     return next_sequence
+
+
+async def _send_privacy_warning(
+    websocket: WebSocket,
+) -> None:
+    """Give a non-echoing warning without changing research-turn sequencing."""
+    await websocket.send_json(
+        {"type": "privacy_warning", "text": PRIVACY_WARNING, "role": "agent"}
+    )
 
 
 async def _record_engagement_turn(
@@ -474,7 +663,7 @@ async def _record_engagement_turn(
             await db.commit()
         return {"triggers": set(event_types) | set(result.flags)}
     except Exception as exc:
-        logger.error(f"Text engagement: failed to record turn {sequence}: {exc}")
+        logger.error(f"Text engagement: failed to record turn {sequence}: {type(exc).__name__}")
         return None
 
 
@@ -531,7 +720,7 @@ async def _apply_text_adaptation(
                 )
             await db.commit()
     except Exception as exc:
-        logger.error(f"Text adaptation: failed at turn {sequence}: {exc}")
+        logger.error(f"Text adaptation: failed at turn {sequence}: {type(exc).__name__}")
 
 
 @router.websocket("/ws/chat/{widget_key}")
@@ -740,7 +929,7 @@ async def text_chat_ws(
 
     logger.info(
         f"Text chat started: session={session_id}, agent={agent_cfg['id']}, "
-        f"widget_key={widget_key}, participant_id={participant_id}"
+        "participant metadata omitted"
     )
 
     timing = build_interview_timing(
@@ -785,15 +974,13 @@ async def text_chat_ws(
         # Emit the hidden [[Qn]] marker even when the progress bar is off: the
         # controller uses it to track which question we're on. It's stripped
         # before the participant and transcript see anything.
-        system_prompt = build_structured_prompt(
-            system_prompt,
-            runtime_guide,
-            emit_progress=True,
-        )
-        structured_controller = TextStructuredController(
-            runtime_guide,
-            language=agent_cfg["language"] or "en",
-        )
+        if runtime_guide.get("conversation_policy") == "contextual_v1":
+            from app.pipeline.conversation_policy import ContextualInterviewController, build_contextual_prompt
+            system_prompt = build_contextual_prompt(system_prompt, runtime_guide)
+            structured_controller = ContextualInterviewController(runtime_guide, language=agent_cfg["language"] or "en")
+        else:
+            system_prompt = build_structured_prompt(system_prompt, runtime_guide, emit_progress=True)
+            structured_controller = TextStructuredController(runtime_guide, language=agent_cfg["language"] or "en")
 
     # Add text-first interface instructions. Optional audio playback uses this
     # exact response text, so spoken and written prompts always stay aligned.
@@ -807,6 +994,11 @@ async def text_chat_ws(
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     sequence = 0
+    evidence_judge_prompt_tokens = 0
+    evidence_judge_completion_tokens = 0
+    evidence_judge_candidates = 0
+    evidence_judge_returned = 0
+    privacy_redaction_counts: Counter[str] = Counter()
 
     # ── Engagement metrics (text profile; observational, lexical + timing) ──
     engagement_scorer = None
@@ -985,6 +1177,9 @@ async def text_chat_ws(
             if msg.get("type") == "finish":
                 final_text = str(msg.get("text") or "").strip()
                 if final_text:
+                    redaction = await _redact_participant_text(final_text)
+                    final_text = redaction.text
+                    privacy_redaction_counts.update(redaction.counts)
                     sequence += 1
                     await _log_turn(
                         session_id, SpeakerRole.USER, final_text, sequence
@@ -995,6 +1190,8 @@ async def text_chat_ws(
                         "content": final_text,
                         "sequence": sequence,
                     })
+                    if redaction.detected:
+                        await _send_privacy_warning(websocket)
                 await websocket.send_json({
                     "type": "ended",
                     "reason": "participant_finished",
@@ -1010,7 +1207,9 @@ async def text_chat_ws(
             if msg.get("type") != "message" or not msg.get("text", "").strip():
                 continue
 
-            user_text = msg["text"].strip()
+            redaction = await _redact_participant_text(msg["text"].strip())
+            user_text = redaction.text
+            privacy_redaction_counts.update(redaction.counts)
 
             # Log user turn
             sequence += 1
@@ -1021,6 +1220,28 @@ async def text_chat_ws(
                 "content": user_text,
                 "sequence": sequence,
             })
+
+            if redaction.detected:
+                await _send_privacy_warning(websocket)
+
+            if user_text in {
+                "[SENSITIVE_CONTENT_REMOVED]",
+                "[POTENTIALLY_IDENTIFYING_CONTEXT_REMOVED]",
+                "[PRIVACY_CHECK_UNAVAILABLE]",
+            }:
+                # A withheld answer provides no research evidence. Keep the
+                # current question rather than praising it or advancing the guide.
+                redirect = (
+                    "Let's stay with the same question. Could you answer in general terms, "
+                    "without details about a specific person? You can also skip this question."
+                )
+                messages.append({"role": "user", "content": user_text})
+                messages.append({"role": "assistant", "content": redirect})
+                sequence = await _send_scripted_agent_turn(
+                    websocket, session_id, redirect, sequence
+                )
+                agent_sent_at = time.monotonic()
+                continue
 
             if engagement_scorer:
                 latency_ms = (
@@ -1048,6 +1269,11 @@ async def text_chat_ws(
 
             messages.append({"role": "user", "content": user_text})
 
+            from app.pipeline.conversation_policy import ContextualInterviewController
+            if isinstance(structured_controller, ContextualInterviewController):
+                structured_controller.remaining_seconds = max(0, timing.target_seconds - (
+                    datetime.now(timezone.utc) - start_time).total_seconds())
+
             # A clearly stated desire to end the session is equivalent to the
             # Finish interview control. This matters in voice-default mode,
             # where participants may naturally say it instead of tapping.
@@ -1057,7 +1283,7 @@ async def text_chat_ws(
                 )
 
                 if classify_participant_turn(
-                    user_text, agent_cfg["language"] or "en"
+                    user_text, agent_cfg["language"] or "en", infer_incomplete=False
                 ) == "stop":
                     await websocket.send_json({
                         "type": "ended",
@@ -1126,7 +1352,7 @@ async def text_chat_ws(
                             agent_sent_at = time.monotonic()
                         continue
                     if classify_participant_turn(
-                        user_text, agent_cfg["language"] or "en"
+                        user_text, agent_cfg["language"] or "en", infer_incomplete=False
                     ) == "answer":
                         # Participants sometimes answer the suspended research
                         # question directly instead of saying "continue".
@@ -1138,10 +1364,11 @@ async def text_chat_ws(
                     participant_information(agent_cfg["research_spec"]),
                     structured_controller.current_prompt_text,
                     agent_cfg["language"] or "en",
+                    infer_incomplete=False,
                 )
                 if interruption_reply:
                     if classify_participant_turn(
-                        user_text, agent_cfg["language"] or "en"
+                        user_text, agent_cfg["language"] or "en", infer_incomplete=False
                     ) == "procedural":
                         awaiting_interruption_confirmation = True
                     messages.append({
@@ -1158,6 +1385,56 @@ async def text_chat_ws(
                         agent_sent_at = time.monotonic()
                     continue
 
+            if (isinstance(structured_controller, ContextualInterviewController)
+                    and structured_controller._last_text
+                    and classify_participant_turn(user_text, agent_cfg["language"] or "en", infer_incomplete=False) == "answer"):
+                structured_controller.note_answer(user_text, sequence)
+
+            # Evidence coverage is judged independently from the moderator.
+            # The call is batched across every unresolved/partial criterion.
+            # Procedural turns and the fixed, non-adaptive profile do not need
+            # semantic grading.
+            authoritative_evidence_for_turn = False
+            if (
+                structured_controller is not None
+                and (settings.evidence_judge_enabled or isinstance(structured_controller, ContextualInterviewController))
+                and structured_controller.needs_evidence_judge
+                and classify_participant_turn(
+                    user_text, agent_cfg["language"] or "en", infer_incomplete=False
+                )
+                == "answer"
+            ):
+                judge_result = await _judge_structured_turn(
+                    structured_controller,
+                    participant_text=user_text,
+                    participant_sequence=sequence,
+                )
+                authoritative_evidence_for_turn = bool(
+                    judge_result["authoritative"]
+                )
+                evidence_judge_prompt_tokens += int(
+                    judge_result["prompt_tokens"] or 0
+                )
+                evidence_judge_completion_tokens += int(
+                    judge_result["completion_tokens"] or 0
+                )
+                evidence_judge_candidates += int(
+                    judge_result["candidate_count"] or 0
+                )
+                evidence_judge_returned += int(
+                    judge_result["returned_count"] or 0
+                )
+                # Place server control immediately before the participant
+                # answer. The participant remains the latest user turn for
+                # RAG lookup and normal conversational recency.
+                messages.insert(
+                    max(0, len(messages) - 1),
+                    {
+                        "role": "user",
+                        "content": str(judge_result["control_note"]),
+                    },
+                )
+
             # Nudge the model to advance/close once a question's budget is up.
             if structured_controller is not None:
                 nudge = structured_controller.maybe_advance_message(user_text)
@@ -1169,7 +1446,7 @@ async def text_chat_ws(
             ).total_seconds()
             participant_kind_for_timing = (
                 classify_participant_turn(
-                    user_text, agent_cfg["language"] or "en"
+                    user_text, agent_cfg["language"] or "en", infer_incomplete=False
                 )
                 if structured_controller is not None
                 else "answer"
@@ -1281,11 +1558,16 @@ async def text_chat_ws(
                 # Send typing indicator
                 await websocket.send_json({"type": "typing"})
 
-                llm_result = await _call_llm(
-                    messages=messages,
-                    model=agent_cfg["llm_model"],
-                    study_id=agent_cfg["study_id"],
-                )
+                contextual_review = None
+                if isinstance(structured_controller, ContextualInterviewController):
+                    llm_result, contextual_review = await _contextual_agent_turn(
+                        structured_controller, messages, model=agent_cfg["llm_model"],
+                        study_id=agent_cfg["study_id"], participant_text=user_text,
+                    )
+                else:
+                    llm_result = await _call_llm(
+                        messages=messages, model=agent_cfg["llm_model"], study_id=agent_cfg["study_id"],
+                    )
                 agent_text = llm_result["content"]
 
                 display_text = agent_text
@@ -1303,8 +1585,13 @@ async def text_chat_ws(
                     # session-owned evidence memory reject repeated or
                     # already-resolved questions without another model call.
                     display_text, marker, decision = strip_control_markers(agent_text)
-                    review = structured_controller.review_turn(
-                        display_text, marker, decision, user_text
+                    review = contextual_review or structured_controller.review_turn(
+                        display_text,
+                        marker,
+                        decision,
+                        user_text,
+                        participant_sequence=sequence,
+                        authoritative_evidence=authoritative_evidence_for_turn,
                     )
                     turn_closed = review.closed
                     display_text = review.text
@@ -1318,7 +1605,7 @@ async def text_chat_ws(
                     # exact suspended question.
                     if (
                         classify_participant_turn(
-                            user_text, agent_cfg["language"] or "en"
+                            user_text, agent_cfg["language"] or "en", infer_incomplete=False
                         )
                         == "clarification"
                         and decision is not None
@@ -1337,6 +1624,20 @@ async def text_chat_ws(
                             "after the turn's first question"
                         )
                     display_text = enforced.strip()
+
+                    # The controller can already have closed the guide when
+                    # its final nudge asks the model for the exact closing
+                    # message. If that model reply omits a TURN decision,
+                    # review.closed may be false even though the participant
+                    # sees the closing. Send the ended event in that case so
+                    # the browser can finish instead of timing out.
+                    if (
+                        not turn_closed
+                        and structured_controller.snapshot()["closed"]
+                        and display_text
+                        == str(runtime_guide.get("closing_message") or "").strip()
+                    ):
+                        turn_closed = True
 
                     # Keep reviewed control state in model context, never in
                     # the participant transcript.
@@ -1392,7 +1693,7 @@ async def text_chat_ws(
                     agent_sent_at = time.monotonic()
 
             except Exception as llm_err:
-                logger.exception(f"Chat {session_id}: LLM error — {llm_err}")
+                logger.error(f"Chat {session_id}: LLM error — {type(llm_err).__name__}")
                 await websocket.send_json({
                     "type": "error",
                     "text": "Sorry, I encountered an issue. Please try again.",
@@ -1407,13 +1708,29 @@ async def text_chat_ws(
         final_status = SessionStatus.TIMED_OUT
         final_reason = "cancelled"
     except Exception as exc:
-        logger.exception(f"Chat {session_id}: error — {exc}")
+        logger.error(f"Chat {session_id}: error — {type(exc).__name__}")
         final_status = SessionStatus.ERROR
         final_reason = "error"
     finally:
         keepalive_stop.set()
         keepalive_task.cancel()
+        protocol_metadata = None
         if structured_controller is not None:
+            protocol_metadata = {
+                **structured_controller.stats(),
+                "evidence_ledger": structured_controller.evidence_ledger(),
+                "evidence_judge_model": (
+                    settings.evidence_judge_model
+                    if settings.evidence_judge_enabled
+                    else None
+                ),
+                "evidence_judge_prompt_tokens": evidence_judge_prompt_tokens,
+                "evidence_judge_completion_tokens": (
+                    evidence_judge_completion_tokens
+                ),
+                "evidence_judge_candidates": evidence_judge_candidates,
+                "evidence_judge_returned": evidence_judge_returned,
+            }
             logger.info(
                 f"Chat {session_id}: structured protocol summary "
                 f"{structured_controller.stats()}"
@@ -1429,7 +1746,12 @@ async def text_chat_ws(
                     sess.status = final_status
                     sess.ended_at = end_time
                     sess.duration_seconds = duration
-                    sess.total_tokens = await aggregate_session_tokens(db, session_id)
+                    transcript_tokens = await aggregate_session_tokens(db, session_id)
+                    sess.total_tokens = (
+                        transcript_tokens
+                        + evidence_judge_prompt_tokens
+                        + evidence_judge_completion_tokens
+                    )
                     sess.completion_metadata = {
                         "reason": final_reason,
                         "timing": timing.as_dict(),
@@ -1456,11 +1778,15 @@ async def text_chat_ws(
                             ),
                         },
                         "protocol": (
-                            structured_controller.stats()
-                            if structured_controller is not None
-                            else None
+                            protocol_metadata
                         ),
                     }
+                    await redact_session_data(
+                        db,
+                        session_id,
+                        session=sess,
+                        ingress_counts=privacy_redaction_counts,
+                    )
                     await db.commit()
 
             # The participant UI only redirects back to the recruitment
@@ -1470,6 +1796,10 @@ async def text_chat_ws(
                     "type": "finalized",
                     "status": final_status.value,
                     "reason": final_reason,
+                    "session_id": str(session_id),
+                    "feedback_token": participant_feedback_token(
+                        agent.widget_key, session_id
+                    ),
                 })
             except Exception:
                 pass
@@ -1487,4 +1817,4 @@ async def text_chat_ws(
             await unregister_session(session_id)
 
         except Exception as cleanup_exc:
-            logger.error(f"Chat {session_id}: failed to finalise — {cleanup_exc}")
+            logger.error(f"Chat {session_id}: failed to finalise — {type(cleanup_exc).__name__}")

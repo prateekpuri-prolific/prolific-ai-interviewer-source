@@ -26,6 +26,7 @@ from pipecat.tests.utils import SleepFrame, run_test
 
 from app.pipeline.interview_guide import (
     DEFAULT_MAX_FOLLOW_UPS,
+    EvidenceStateTracker,
     InterviewGuideProcessor,
     StructuredOutputFilter,
     TextStructuredController,
@@ -42,10 +43,312 @@ from app.pipeline.interview_guide import (
     looks_like_procedural_resume,
     participant_interruption_response,
     procedural_resume_response,
+    interview_guide_quality_warnings,
     resolve_orchestration_settings,
     strip_control_markers,
     strip_progress_marker,
 )
+
+
+def test_recent_follow_up_uses_reported_ai_use_wording():
+    use_probe = "What were you using it for that time?"
+    nonuse_probe = "What did you hear or talk about?"
+    question = {
+        "id": "recent_encounter",
+        "text": "Tell me about your last AI encounter.",
+        "evidence_goal": ["A concrete recent task or account, not just a time."],
+        "probes": [use_probe, nonuse_probe],
+        "evidence_probes": {"e1": use_probe},
+        "probe_wording_by_ai_use": {
+            "uses_ai": use_probe,
+            "no_ai_use": nonuse_probe,
+        },
+    }
+    tracker = EvidenceStateTracker([question], "Done.", probe_selection="relevance")
+    tracker._reported_ai_use = True
+    assert tracker._fallback_coverage_repair_text(0) == use_probe
+    assert tracker._available_listed_probe(0)[1] == use_probe
+    tracker._reported_ai_use = False
+    assert tracker._fallback_coverage_repair_text(0) == nonuse_probe
+    assert tracker._available_listed_probe(0)[1] == nonuse_probe
+    use_intent = next(
+        intent for intent, wording in tracker._catalog[0]["probes"].items()
+        if wording == use_probe
+    )
+    corrected, decision, changed, reason = tracker._normalize_probe_policy(
+        use_probe,
+        TurnDecision(action="probe", question=1, intent=use_intent),
+        0,
+        "last week",
+    )
+    assert corrected == nonuse_probe
+    assert changed is True
+    assert reason == "ai_use_probe_wording"
+    assert tracker._catalog[0]["probes"][decision.intent] == nonuse_probe
+
+
+def test_nonuser_probe_branch_survives_warmup_budget_advance():
+    use_probe = "What were you using it for that time?"
+    nonuse_probe = "What did you hear or talk about?"
+    guide = {
+        "orchestration_profile": "semi_structured",
+        "probe_selection": "relevance",
+        "questions": [
+            {"id": "everyday_use", "text": "Do you use AI day to day?", "phase": "warm_up", "max_follow_ups": 0},
+            {
+                "id": "recent_encounter",
+                "text": "When did you last use AI?",
+                "main_wording_by_ai_use": {
+                    "uses_ai": "When did you last use AI?",
+                    "no_ai_use": "What have you most recently heard about AI?",
+                },
+                "probe_wording_by_ai_use": {
+                    "uses_ai": use_probe,
+                    "no_ai_use": nonuse_probe,
+                },
+                "evidence_goal": ["A specific recent task or account, not just a time."],
+                "probes": [use_probe, nonuse_probe],
+                "evidence_probes": {"e1": use_probe},
+                "max_follow_ups": 1,
+            },
+        ],
+    }
+    controller = TextStructuredController(guide)
+    controller.review_turn(
+        "Do you use AI day to day?", 1,
+        TurnDecision(action="main", question=1, intent="everyday_use:main"),
+        "Ready.",
+    )
+    controller.register_bot_turn("Ready.")
+    controller.maybe_advance_message("No, I do not use AI.")
+    controller.review_turn(
+        "What have you most recently heard about AI?", 2,
+        TurnDecision(action="main", question=2, intent="recent_encounter:main"),
+        "No, I do not use AI.",
+    )
+    assert controller._evidence._reported_ai_use is False
+    review = controller.review_turn(
+        use_probe, 2,
+        TurnDecision(action="probe", question=2, intent="recent_encounter:p1"),
+        "last week",
+    )
+    assert review.text == nonuse_probe
+
+
+def test_quality_warning_detects_cross_card_paraphrase():
+    guide = {
+        "questions": [
+            {
+                "id": "need",
+                "text": "What would AI need to do differently to handle that task reliably?",
+                "target_ids": ["required_capability"],
+            },
+            {
+                "id": "need_copy_copy",
+                "text": "What do you wish the AI could improve so it could reliably do that task?",
+                "target_ids": ["required_capability"],
+            },
+        ]
+    }
+    warnings = interview_guide_quality_warnings(guide)
+    assert len(warnings) == 1
+    assert "Questions 1 and 2" in warnings[0]
+
+
+def test_runtime_skips_semantically_duplicated_main_card():
+    guide = {
+        "questions": [
+            {
+                "id": "need",
+                "text": "What would AI need to do differently to handle that task reliably?",
+                "target_ids": ["required_capability"],
+                "evidence_goal": ["Needed capability"],
+            },
+            {
+                "id": "wish",
+                "text": "What do you wish the AI could improve so it could reliably do that task?",
+                "target_ids": ["required_capability"],
+                "evidence_goal": ["Needed capability"],
+            },
+            {
+                "id": "close_reflection",
+                "text": "What else should the research team understand?",
+                "evidence_goal": ["Final reflection"],
+            },
+        ]
+    }
+    controller = TextStructuredController(guide)
+    controller.review_turn(
+        guide["questions"][0]["text"],
+        1,
+        TurnDecision(action="main", question=1, intent="need:main"),
+    )
+    review = controller.review_turn(
+        guide["questions"][1]["text"],
+        2,
+        TurnDecision(
+            action="main",
+            question=2,
+            intent="wish:main",
+            resolved={"need:e1": "covered"},
+        ),
+        "It needed to preserve the layout and follow the design system.",
+    )
+    assert review.replaced is True
+    assert review.reason == "semantic_duplicate_main"
+    assert review.text == "What else should the research team understand?"
+    assert controller.stats()["semantic_duplicate_mains_blocked"] == 1
+
+
+def test_problem_episode_gate_repairs_then_accepts_matching_example():
+    guide = {
+        "orchestration_profile": "repair_only",
+        "allow_follow_ups": False,
+        "skip_answered_questions": True,
+        "allow_emergent_follow_ups": False,
+        "questions": [
+            {
+                "id": "episode",
+                "text": "Tell me about a task where AI fell short.",
+                "answer_requirement": "problem_episode",
+                "requirement_miss_action": "end_interview",
+                "evidence_goal": ["Task", "Shortfall"],
+            },
+            {"id": "next", "text": "What did you do next?", "evidence_goal": ["Action"]},
+        ],
+    }
+    controller = TextStructuredController(guide)
+    controller.review_turn(
+        guide["questions"][0]["text"],
+        1,
+        TurnDecision(action="main", question=1, intent="episode:main"),
+    )
+    repair = controller.review_turn(
+        guide["questions"][1]["text"],
+        2,
+        TurnDecision(action="main", question=2, intent="next:main"),
+        "I used it to make a presentation for a client.",
+    )
+    assert repair.reason == "answer_requirement_repair"
+    assert "still fell short" in repair.text
+    assert repair.closed is False
+
+    accepted = controller.review_turn(
+        guide["questions"][1]["text"],
+        2,
+        TurnDecision(
+            action="main",
+            question=2,
+            intent="next:main",
+            resolved={"episode:e1": "covered", "episode:e2": "covered"},
+        ),
+        "The charts were generic and the numbers in two labels were wrong.",
+    )
+    assert accepted.text == "What did you do next?"
+    assert accepted.closed is False
+    assert controller.stats()["answer_requirements_met"] == 1
+
+
+def test_problem_episode_gate_ends_without_manufacturing_a_failure():
+    guide = {
+        "orchestration_profile": "repair_only",
+        "allow_follow_ups": False,
+        "skip_answered_questions": True,
+        "allow_emergent_follow_ups": False,
+        "questions": [
+            {
+                "id": "episode",
+                "text": "Tell me about a task where AI fell short.",
+                "answer_requirement": "problem_episode",
+                "requirement_miss_action": "end_interview",
+                "evidence_goal": ["Task", "Shortfall"],
+            },
+            {"id": "failure", "text": "What failed?", "evidence_goal": ["Failure"]},
+        ],
+    }
+    controller = TextStructuredController(guide)
+    controller.review_turn(
+        guide["questions"][0]["text"],
+        1,
+        TurnDecision(action="main", question=1, intent="episode:main"),
+    )
+    controller.review_turn(
+        guide["questions"][1]["text"],
+        2,
+        TurnDecision(action="main", question=2, intent="failure:main"),
+        "I used it to draft a note and was happy with the result.",
+    )
+    closed = controller.review_turn(
+        guide["questions"][1]["text"],
+        2,
+        TurnDecision(action="main", question=2, intent="failure:main"),
+        "No, nothing went wrong and I cannot think of another recent example.",
+    )
+    assert closed.closed is True
+    assert closed.reason == "answer_requirement_not_met"
+    assert "completely fine" in closed.text
+    assert controller.stats()["answer_requirement_miss_closures"] == 1
+
+
+def test_repair_only_profile_honors_study_wide_quality_repair_cap():
+    guide = {
+        "orchestration_profile": "repair_only",
+        "allow_follow_ups": False,
+        "skip_answered_questions": True,
+        "allow_emergent_follow_ups": False,
+        "max_quality_repairs": 1,
+        "questions": [
+            {"id": "one", "text": "First?", "evidence_goal": ["One A", "One B"]},
+            {"id": "two", "text": "Second?", "evidence_goal": ["Two A", "Two B"]},
+            {"id": "three", "text": "Third?", "evidence_goal": ["Three"]},
+        ],
+    }
+    controller = TextStructuredController(guide)
+    controller.review_turn(
+        "First?", 1, TurnDecision(action="main", question=1, intent="one:main")
+    )
+    first_repair = controller.review_turn(
+        "Second?",
+        2,
+        TurnDecision(
+            action="main",
+            question=2,
+            intent="two:main",
+            resolved={"one:e1": "covered"},
+        ),
+        "Here is the first part.",
+    )
+    assert first_repair.decision is not None
+    assert first_repair.decision.action == "probe"
+
+    controller.review_turn(
+        "Second?",
+        2,
+        TurnDecision(
+            action="main",
+            question=2,
+            intent="two:main",
+            resolved={"one:e2": "covered"},
+        ),
+        "And here is the second part.",
+    )
+    after_cap = controller.review_turn(
+        "Third?",
+        3,
+        TurnDecision(
+            action="main",
+            question=3,
+            intent="three:main",
+            resolved={"two:e1": "covered"},
+        ),
+        "Here is only the first part of question two.",
+    )
+    assert after_cap.text == "Third?"
+    assert after_cap.decision is not None
+    assert after_cap.decision.action == "main"
+    stats = controller.stats()
+    assert stats["answer_repairs_accepted"] == 1
+    assert stats["answer_repairs_blocked"] >= 1
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -128,7 +431,7 @@ class TestBuildStructuredPrompt:
         out = build_structured_prompt("Hi.", two_question_guide)
         assert "NEVER ask the same question twice" in out
         assert "great" in out  # part of the don't-validate rule
-        assert "Do NOT acknowledge or evaluate" in out
+        assert "Do NOT praise or evaluate" in out
 
     def test_scope_clarifications_are_minimal_and_do_not_advance(self, two_question_guide):
         out = build_structured_prompt("Hi.", two_question_guide)
@@ -469,6 +772,24 @@ class TestTurnDecisionMarker:
             provenance="direct",
         )
 
+    def test_preserves_exact_evidence_sources_in_hidden_state(self):
+        text = (
+            '[[TURN {"action":"probe","question":2,'
+            '"intent":"inputs:p1","resolved":{"inputs:e1":"covered"},'
+            '"evidence_sources":{"inputs:e1":"Claude Design"}}]] '
+            "What instructions did you give it?"
+        )
+
+        cleaned, marker, decision = strip_control_markers(text)
+
+        assert cleaned.strip() == "What instructions did you give it?"
+        assert marker is None
+        assert decision is not None
+        assert decision.evidence_sources == {"inputs:e1": "Claude Design"}
+        assert '"evidence_sources":{"inputs:e1":"Claude Design"}' in (
+            control_marker_prefix(None, decision)
+        )
+
     def test_invalid_json_is_stripped_without_becoming_state(self):
         cleaned, marker, decision = strip_control_markers(
             '[[TURN {not-json}]] [[Q1]] Hello?'
@@ -523,6 +844,15 @@ class TestTurnDecisionMarker:
         assert cleaned.strip() == "What happened?"
         assert marker == 2
         assert decision is None
+
+    def test_extra_hidden_marker_bracket_never_leaks_to_participant(self):
+        cleaned, marker, _ = strip_control_markers(
+            "[[Q1]]]\nTo start us off, what comes to mind when you think about AI?"
+        )
+        assert marker == 1
+        assert cleaned.strip() == (
+            "To start us off, what comes to mind when you think about AI?"
+        )
 
 
 class TestProgressMarkerPrompt:
@@ -701,6 +1031,8 @@ class TestParticipantTurnControl:
             ("I mean, I think...", "continuation"),
             ("At that point I.", "continuation"),
             ("Does Facebook count?", "clarification"),
+            ("That question doesn't make sense", "clarification"),
+            ("I don't know what you mean", "clarification"),
             (
                 "Do you mean brainstorming a question or actually choosing it?",
                 "clarification",
@@ -1624,6 +1956,146 @@ class TestTextStructuredController:
 
         assert c.current_question_index == 0
 
+    def test_protected_recent_main_precedes_missing_evidence_probe(self):
+        guide = {
+            "orchestration_profile": "semi_structured",
+            "allow_follow_ups": True,
+            "skip_answered_questions": True,
+            "questions": [
+                {
+                    "id": "warmup",
+                    "text": "Do you use AI day to day?",
+                    "phase": "warm_up",
+                    "always_ask": True,
+                    "evidence_goal": [],
+                    "max_follow_ups": 0,
+                },
+                {
+                    "id": "recent",
+                    "text": "When did you last use or hear about AI?",
+                    "always_ask": True,
+                    "evidence_goal": ["A recent use or secondhand account"],
+                    "max_follow_ups": 0,
+                },
+            ],
+            "closing_message": "Done.",
+        }
+        c = TextStructuredController(guide)
+        c.review_turn(
+            guide["questions"][0]["text"],
+            1,
+            TurnDecision(action="main", question=1, intent="warmup:main"),
+            "Ready.",
+        )
+        c.register_bot_turn("Ready.")
+        c.maybe_advance_message("I use Claude most days for coding.")
+
+        review = c.review_turn(
+            "What's one concrete example of what you mean?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="recent:emergent:clarification",
+                resolved={"recent:e1": "partial"},
+            ),
+            "I use Claude most days for coding.",
+        )
+
+        assert review.replaced is True
+        assert review.reason == "protected_main_before_probe"
+        assert review.text == guide["questions"][1]["text"]
+
+    @pytest.mark.parametrize(
+        ("warmup_answer", "proposed", "expected"),
+        [
+            (
+                "I use AI for coding and research reports.",
+                "You mentioned coding and research reports. When was the last time you used AI, talked about it, or heard about it from someone else?",
+                "You mentioned coding and research reports. Can you tell me about the last time you used AI and what you were doing?",
+            ),
+            (
+                "No, I don't use AI tools day to day.",
+                "When was the last time you used AI, talked about it, or heard about it from someone else?",
+                "What's the most recent thing you heard or talked about concerning AI?",
+            ),
+        ],
+    )
+    def test_recent_main_wording_follows_warmup_use(self, warmup_answer, proposed, expected):
+        guide = {
+            "orchestration_profile": "semi_structured",
+            "questions": [
+                {
+                    "id": "everyday_use",
+                    "text": "Do you use AI day to day?",
+                    "phase": "warm_up",
+                    "always_ask": True,
+                    "evidence_goal": [],
+                    "max_follow_ups": 0,
+                },
+                {
+                    "id": "recent_encounter",
+                    "text": "Can you tell me about the last time you used AI and what you were doing?",
+                    "main_wording_by_ai_use": {
+                        "uses_ai": "Can you tell me about the last time you used AI and what you were doing?",
+                        "no_ai_use": "What's the most recent thing you heard or talked about concerning AI?",
+                    },
+                    "always_ask": True,
+                    "evidence_goal": ["A recent use or secondhand account"],
+                    "max_follow_ups": 0,
+                },
+            ],
+            "closing_message": "Done.",
+        }
+        c = TextStructuredController(guide)
+        c.review_turn(
+            guide["questions"][0]["text"],
+            1,
+            TurnDecision(action="main", question=1, intent="everyday_use:main"),
+            "Ready.",
+        )
+        review = c.review_turn(
+            proposed,
+            2,
+            TurnDecision(action="main", question=2, intent="recent_encounter:main"),
+            warmup_answer,
+        )
+
+        assert review.text == expected
+        assert review.reason == "ai_use_main_wording"
+        assert review.question_index == 1
+
+    def test_replacement_recent_main_uses_nonuser_wording(self):
+        guide = {
+            "orchestration_profile": "semi_structured",
+            "questions": [
+                {"id": "everyday_use", "text": "Do you use AI day to day?", "phase": "warm_up", "always_ask": True},
+                {
+                    "id": "recent_encounter",
+                    "text": "When did you last use AI?",
+                    "main_wording_by_ai_use": {
+                        "uses_ai": "When did you last use AI?",
+                        "no_ai_use": "What have you most recently heard about AI?",
+                    },
+                    "always_ask": True,
+                    "evidence_goal": ["Recent experience"],
+                },
+            ],
+        }
+        c = TextStructuredController(guide)
+        c.review_turn(
+            guide["questions"][0]["text"], 1,
+            TurnDecision(action="main", question=1, intent="everyday_use:main"),
+            "Ready.",
+        )
+        review = c.review_turn(
+            "Can you give an example?", None,
+            TurnDecision(action="probe", question=2, intent="recent_encounter:emergent:clarification"),
+            "No, I don't use AI.",
+        )
+        assert review.reason == "protected_main_before_probe"
+        assert review.text == "What have you most recently heard about AI?"
+
     def test_dependency_is_server_enforced(self):
         guide = {
             "orchestration_profile": "repair_only",
@@ -2350,6 +2822,15 @@ class TestTextStructuredController:
         assert c.snapshot()["nudge_pending"] is True
         assert c.snapshot()["bot_turns_on_question"] == 3
 
+    def test_confusing_question_feedback_does_not_advance(self, two_question_guide):
+        c = TextStructuredController(two_question_guide)
+        for answer in ("answer one", "answer two", "answer three"):
+            c.register_bot_turn(answer)
+        assert c.snapshot()["nudge_pending"] is True
+        assert c.maybe_advance_message("That question doesn't make sense") is None
+        assert c.current_question_index == 0
+        assert c.snapshot()["nudge_pending"] is True
+
     def test_flow_repair_returns_to_exact_suspended_probe(
         self, two_question_guide
     ):
@@ -2525,7 +3006,8 @@ class TestTextStructuredController:
         assert review.replaced is True
         assert review.reason == "clarification_advance_blocked"
         assert review.marker is None
-        assert review.text == "What made you keep that decision for yourself?"
+        assert review.text.startswith("I meant both.")
+        assert "Would you like to continue" in review.text
         assert "future" not in review.text.lower()
         assert c.current_question_index == 0
 
@@ -3263,3 +3745,415 @@ class TestTextStructuredController:
         assert closing == two_question_guide["closing_message"]
         assert c.is_finished is True
         assert c.stats()["completed"] is True
+
+
+class TestEvidenceProvenanceLedger:
+    @staticmethod
+    def _guide():
+        return {
+            "orchestration_profile": "semi_structured",
+            "questions": [
+                {
+                    "id": "episode",
+                    "text": "What task did you try?",
+                    "evidence_goal": ["Concrete task"],
+                    "probes": ["What about the result fell short?"],
+                },
+                {
+                    "id": "inputs",
+                    "text": "What did you give the AI to work with?",
+                    "evidence_goal": [
+                        "AI product or tool",
+                        "Documents or examples provided",
+                        "Instructions provided",
+                        "Important constraints provided",
+                    ],
+                    "probes": [
+                        "What instructions did you give it?",
+                        "Were there any important constraints?",
+                    ],
+                },
+                {
+                    "id": "outcome",
+                    "text": "What happened with the result?",
+                    "evidence_goal": ["Observed result"],
+                    "probes": [],
+                },
+            ],
+            "closing_message": "Thanks.",
+        }
+
+    def test_downstream_coverage_records_source_turn_and_missing_parts(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+
+        participant = (
+            "I used Claude Design and gave it the experiment results plus two "
+            "example sites, but I did not explain the audience."
+        )
+        review = controller.review_turn(
+            (
+                "You mentioned giving Claude Design the results and two example "
+                "sites. What instructions did you give it?"
+            ),
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p1",
+                resolved={
+                    "episode:e1": "covered",
+                    "inputs:e1": "covered",
+                    "inputs:e2": "covered",
+                },
+                evidence_sources={
+                    "episode:e1": "used Claude Design",
+                    "inputs:e1": "Claude Design",
+                    "inputs:e2": (
+                        "the experiment results plus two example sites"
+                    ),
+                },
+            ),
+            participant,
+            participant_sequence=7,
+        )
+
+        assert review.replaced is False
+        assert review.question_index == 1
+        assert review.decision is not None
+        assert review.decision.resolved["inputs:e1"] == "covered"
+        assert review.decision.evidence_sources["inputs:e1"] == "Claude Design"
+
+        inputs = controller.evidence_ledger()["questions"][1]
+        assert inputs["coverage_status"] == "partial"
+        assert inputs["remaining_evidence_ids"] == ["inputs:e3", "inputs:e4"]
+        evidence = {item["evidence_id"]: item for item in inputs["evidence"]}
+        assert evidence["inputs:e1"]["status"] == "covered"
+        assert evidence["inputs:e1"]["sources"] == [
+            {
+                "participant_turn": 1,
+                "turn_sequence": 7,
+                "response_excerpt": participant,
+                "evidence_excerpt": "Claude Design",
+                "status": "covered",
+            }
+        ]
+        assert evidence["inputs:e3"]["status"] == "missing"
+        assert evidence["inputs:e3"]["sources"] == []
+
+    def test_invalid_source_quote_is_not_persisted_or_repeated_to_model(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        participant = "I used Claude Design for a website redesign."
+        review = controller.review_turn(
+            "What instructions did you give it?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p1",
+                resolved={"episode:e1": "covered", "inputs:e1": "covered"},
+                evidence_sources={
+                    "episode:e1": "website redesign",
+                    "inputs:e1": "GPT-4 Enterprise",
+                },
+            ),
+            participant,
+            participant_sequence=9,
+        )
+
+        assert review.decision is not None
+        assert "inputs:e1" not in review.decision.evidence_sources
+        inputs = controller.evidence_ledger()["questions"][1]
+        source = inputs["evidence"][0]["sources"][0]
+        assert source["turn_sequence"] == 9
+        assert source["response_excerpt"] == participant
+        assert "evidence_excerpt" not in source
+        assert controller.stats()["invalid_evidence_source_excerpts"] == 1
+
+    def test_plain_downstream_probe_gets_one_earlier_answer_bridge(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        controller.review_turn(
+            "What about the result fell short?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=1,
+                intent="episode:p1",
+                resolved={"inputs:e1": "covered"},
+                evidence_sources={
+                    "inputs:e1": "Claude Design",
+                },
+            ),
+            "I used Claude Design for a website redesign.",
+            participant_sequence=3,
+        )
+
+        review = controller.review_turn(
+            "What instructions did you give it?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p1",
+                resolved={"episode:e1": "covered"},
+                evidence_sources={"episode:e1": "looked generic"},
+            ),
+            "The result looked generic.",
+            participant_sequence=5,
+        )
+
+        assert review.replaced is True
+        assert review.reason == "evidence_continuity_bridge_added"
+        assert review.text == (
+            "Earlier, you mentioned Claude Design. "
+            "What instructions did you give it?"
+        )
+        assert controller.stats()["continuity_bridges_added"] == 1
+
+    def test_immediately_supplied_evidence_does_not_trigger_recap(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        review = controller.review_turn(
+            "What instructions did you give it?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p1",
+                resolved={"episode:e1": "covered", "inputs:e1": "covered"},
+                evidence_sources={
+                    "episode:e1": "website redesign",
+                    "inputs:e1": "Claude Design",
+                },
+            ),
+            "I used Claude Design for a website redesign.",
+            participant_sequence=3,
+        )
+
+        assert review.text == "What instructions did you give it?"
+        assert controller.stats()["continuity_bridges_added"] == 0
+
+    def test_probe_policy_correction_keeps_the_continuity_bridge(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        controller.review_turn(
+            "What about the result fell short?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=1,
+                intent="episode:p1",
+                resolved={"inputs:e1": "covered"},
+                evidence_sources={"inputs:e1": "Claude Design"},
+            ),
+            "I used Claude Design for a website redesign.",
+            participant_sequence=3,
+        )
+        review = controller.review_turn(
+            "Could you unpack the instructions?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:emergent:meaning",
+                resolved={"episode:e1": "covered"},
+                evidence_sources={"episode:e1": "website looked generic"},
+            ),
+            "The website looked generic.",
+            participant_sequence=5,
+        )
+
+        assert review.replaced is True
+        assert review.decision is not None
+        assert review.decision.intent == "inputs:p1"
+        assert review.text == (
+            "Earlier, you mentioned Claude Design. "
+            "What instructions did you give it?"
+        )
+
+    def test_repair_only_focused_advance_gets_the_same_memory_bridge(self):
+        guide = {
+            "orchestration_profile": "repair_only",
+            "questions": [
+                {
+                    "id": "episode",
+                    "text": "What task fell short?",
+                    "evidence_goal": ["Concrete task", "Observable shortfall"],
+                },
+                {
+                    "id": "inputs",
+                    "text": "What did you give the AI?",
+                    "evidence_goal": ["AI product", "Instructions"],
+                    "probes": ["What instructions did you give it?"],
+                },
+            ],
+        }
+        controller = TextStructuredController(guide)
+        controller.review_turn(
+            "What task fell short?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        controller.review_turn(
+            "What about the result fell short?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=1,
+                intent="episode:emergent:clarification",
+                resolved={"episode:e1": "covered", "inputs:e1": "covered"},
+                evidence_sources={
+                    "episode:e1": "redesign a website",
+                    "inputs:e1": "Claude Design",
+                },
+            ),
+            "I used Claude Design to redesign a website.",
+            participant_sequence=3,
+        )
+        review = controller.review_turn(
+            "What instructions did you give it?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:emergent:clarification",
+                resolved={"episode:e2": "covered"},
+                evidence_sources={"episode:e2": "looked generic"},
+            ),
+            "The result looked generic.",
+            participant_sequence=5,
+        )
+
+        assert review.text == (
+            "Earlier, you mentioned Claude Design. "
+            "What instructions did you give it?"
+        )
+        assert review.question_index == 1
+        assert controller.stats()["continuity_bridges_added"] == 1
+
+    def test_partial_criterion_can_be_upgraded_by_a_later_response(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        controller.review_turn(
+            "What instructions did you give it?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p1",
+                resolved={"episode:e1": "covered", "inputs:e3": "partial"},
+                evidence_sources={"inputs:e3": "make a professional website"},
+            ),
+            "I told it to make a professional website.",
+            participant_sequence=3,
+        )
+        controller.review_turn(
+            "Were there any important constraints?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p2",
+                resolved={"inputs:e3": "covered"},
+                evidence_sources={
+                    "inputs:e3": "aimed at policy researchers and use plain language"
+                },
+            ),
+            (
+                "More specifically, I said it was aimed at policy researchers "
+                "and should use plain language."
+            ),
+            participant_sequence=5,
+        )
+
+        evidence = {
+            item["evidence_id"]: item
+            for item in controller.evidence_ledger()["questions"][1]["evidence"]
+        }
+        assert evidence["inputs:e3"]["status"] == "covered"
+        assert [source["turn_sequence"] for source in evidence["inputs:e3"]["sources"]] == [3, 5]
+        assert [source["status"] for source in evidence["inputs:e3"]["sources"]] == ["partial", "covered"]
+
+    def test_repeated_status_without_quote_does_not_create_false_source(self):
+        controller = TextStructuredController(self._guide())
+        controller.review_turn(
+            "What task did you try?",
+            1,
+            TurnDecision(action="main", question=1, intent="episode:main"),
+        )
+        controller.review_turn(
+            "What instructions did you give it?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p1",
+                resolved={"episode:e1": "covered", "inputs:e1": "covered"},
+                evidence_sources={
+                    "episode:e1": "website redesign",
+                    "inputs:e1": "Claude Design",
+                },
+            ),
+            "I used Claude Design for a website redesign.",
+            participant_sequence=3,
+        )
+        controller.review_turn(
+            "Were there any important constraints?",
+            None,
+            TurnDecision(
+                action="probe",
+                question=2,
+                intent="inputs:p2",
+                resolved={"inputs:e1": "covered", "inputs:e3": "covered"},
+                evidence_sources={"inputs:e3": "aimed at policy researchers"},
+            ),
+            "I said it was aimed at policy researchers.",
+            participant_sequence=5,
+        )
+
+        evidence = {
+            item["evidence_id"]: item
+            for item in controller.evidence_ledger()["questions"][1]["evidence"]
+        }
+        assert [
+            source["turn_sequence"] for source in evidence["inputs:e1"]["sources"]
+        ] == [3]
+        assert [
+            source["turn_sequence"] for source in evidence["inputs:e3"]["sources"]
+        ] == [5]
+
+    def test_prompt_requests_selective_natural_acknowledgement(self):
+        prompt = build_structured_prompt(
+            "Be neutral.", self._guide(), emit_progress=True
+        )
+
+        assert "shortest useful EXACT excerpt" in prompt
+        assert "MANDATORY CONTINUITY BRIDGE" in prompt
+        assert 'Never say that they "answered part of the next' in prompt
+        assert 'question," "satisfied criteria,"' in prompt

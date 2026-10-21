@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Optional
 
@@ -64,7 +64,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 _CLARIFICATION_PATTERNS_BY_LANG: dict[str, list[str]] = {
     "en": [
         r"\bwhat do you mean\b",
+        r"\bi (?:don't|do not) know what you mean\b",
         r"\bwhat does that mean\b",
+        r"\b(?:that|this|your|the) question (?:(?:doesn't|does not) make sense|(?:isn't|is not) clear)\b",
         r"\bdidn'?t (get|hear|catch|understand)\b",
         r"\bdon'?t (understand|get it|follow)\b",
         r"\b(can|could) you (repeat|rephrase|clarify|explain)\b",
@@ -231,6 +233,23 @@ def looks_like_clarification(text: str, language: str = "en") -> bool:
     lang = (language or "en").split("-")[0].split("_")[0].lower()
     if _clarification_re(lang).search(text):
         return True
+    # Scope checks can be embedded in otherwise substantive answers. Require
+    # interview-directed wording, not just a question mark or "is that right".
+    scope_check = re.search(
+        r"\b(?:have i (?:understood|got) (?:the |this )?(?:scope|assignment|question)|"
+        r"(?:is|was) (?:this|the (?:interview|study|question)) (?:about|asking)|"
+        r"(?:am i|have i been) (?:understanding|answering) (?:your|the) question)\b",
+        text, re.IGNORECASE,
+    )
+    if scope_check and "?" in text[scope_check.end():]:
+        after_question = text[scope_check.end():].split("?", 1)[1].lstrip()
+        if not re.match(r"(?:no|yes)[,!.\s]", after_question, re.I):
+            return True
+    if re.search(r"\b(?:have i got that right|is that right)\s*\?", text, re.I) and re.search(
+        r"\b(?:your (?:study|question)|this (?:study|interview)|parameters of|"
+        r"what you(?:'re| are) (?:asking|looking for))\b", text, re.I
+    ):
+        return True
     if len(text.split()) <= 12 and re.search(
         r"\b(?:does|do|is|are|would)\s+.+?\s+"
         r"(?:count|qualify|apply|included|in scope)\b",
@@ -244,6 +263,19 @@ def looks_like_clarification(text: str, language: str = "en") -> bool:
     # to be replayed verbatim. Only the explicit, multilingual patterns above
     # are allowed to interrupt the guide.
     return False
+
+
+# Explicit revisions, not conversational filler such as "actually" alone.
+# Used as a release gate for reconsidering covered evidence; the semantic
+# judge must still attribute the exact correction to the particular criterion.
+_EVIDENCE_REVISION_RE = re.compile(
+    r"\b(?:i (?:misspoke|was mistaken|got (?:that|it) wrong)|"
+    r"(?:let me|i (?:need|want|would like) to) correct|"
+    r"i (?:am |was )?no longer (?:sure|certain|remember)|"
+    r"i(?:'m| am) not (?:sure|certain) (?:anymore|after all)|"
+    r"(?:my|our|the) (?:budget|maximum|minimum|preference|limit) (?:has |have )?changed|"
+    r"(?:correction|i meant)\b)", re.IGNORECASE,
+)
 
 
 # Participant turns that interrupt the interview flow need stronger handling
@@ -324,7 +356,7 @@ _INCOMPLETE_END_RE = re.compile(
 )
 
 
-def classify_participant_turn(text: str, language: str = "en") -> str:
+def classify_participant_turn(text: str, language: str = "en", *, infer_incomplete: bool = True) -> str:
     """Classify a participant turn for interview-flow control.
 
     The classifier is intentionally conservative. It only claims an
@@ -348,7 +380,7 @@ def classify_participant_turn(text: str, language: str = "en") -> str:
     # A short transcript ending in an obvious hanging clause is usually an
     # endpointing/STT cut-off, not a complete answer. Longer turns can end in
     # colloquial fragments legitimately, so do not second-guess those.
-    if len(cleaned.split()) <= 12 and _INCOMPLETE_END_RE.search(cleaned):
+    if infer_incomplete and len(cleaned.split()) <= 12 and _INCOMPLETE_END_RE.search(cleaned):
         return "continuation"
     return "answer"
 
@@ -368,6 +400,7 @@ def participant_interruption_response(
     participant_information: Optional[dict] = None,
     current_question: str = "",
     language: str = "en",
+    *, infer_incomplete: bool = True,
 ) -> Optional[str]:
     """Return a grounded, deterministic response for high-risk interruptions.
 
@@ -377,7 +410,7 @@ def participant_interruption_response(
     A procedural answer pauses the guide and asks whether the participant is
     ready; the caller must wait for that reply before resuming the question.
     """
-    kind = classify_participant_turn(text, language)
+    kind = classify_participant_turn(text, language, infer_incomplete=infer_incomplete)
     info = participant_information or {}
     answer = ""
 
@@ -671,6 +704,67 @@ _TERMINAL_STATUS_PATTERNS = {
 }
 
 
+_PROBLEM_EPISODE_SIGNAL_RE = re.compile(
+    r"\b(?:fell short|did(?:n'?t| not) (?:work|meet|help|handle|produce)|"
+    r"could(?:n'?t| not)|fail(?:ed|ure)?|error|wrong|incorrect|hallucinat\w*|"
+    r"omission|missed|missing|problem|issue|unusable|unreliable|inaccurate|"
+    r"generic|slop|poor|bad|worse|frustrat\w*|flatten\w*|blur\w*|degrad\w*|"
+    r"not quite right|had to redo|need(?:ed)? (?:a lot of |much )?"
+    r"(?:editing|rework|correction))\b",
+    re.IGNORECASE,
+)
+_NO_PROBLEM_EPISODE_RE = re.compile(
+    r"\b(?:nothing (?:went|was) wrong|no (?:error|errors|problem|problems|issue|issues)|"
+    r"did(?:n'?t| not) (?:notice|see|have) (?:any )?(?:error|problem|issue)|"
+    r"worked (?:well|fine)|happy with (?:it|the result)|satisfied with (?:it|the result))\b",
+    re.IGNORECASE,
+)
+
+
+def answer_contains_problem_episode(text: str) -> bool:
+    """Whether an answer contains an observable sign that the problem premise fits."""
+    value = str(text or "")
+    if _NO_PROBLEM_EPISODE_RE.search(value) and not re.search(
+        r"\b(?:but|except|however)\b", value, re.IGNORECASE
+    ):
+        return False
+    return bool(_PROBLEM_EPISODE_SIGNAL_RE.search(value))
+
+
+def question_answer_requirement(question: dict) -> str:
+    configured = str(question.get("answer_requirement") or "any")
+    if configured != "any":
+        return configured
+    # Backward compatibility for already-fielded guides created before the
+    # explicit field existed. Keep the inference narrow: a concrete focal
+    # task/episode plus an explicit failure premise.
+    source = " ".join(
+        [
+            str(question.get("text") or ""),
+            str(question.get("purpose") or ""),
+            " ".join(str(value) for value in question.get("target_ids") or []),
+        ]
+    ).lower()
+    if re.search(r"\b(?:task|episode|experience)\b", source) and re.search(
+        r"\b(?:fell short|failure|failed|did not fully meet|didn't meet|"
+        r"could not handle|couldn't handle)\b",
+        source,
+    ):
+        return "problem_episode"
+    return "any"
+
+
+def question_requirement_miss_action(question: dict) -> str:
+    configured = question.get("requirement_miss_action")
+    if configured:
+        return str(configured)
+    return (
+        "end_interview"
+        if question_answer_requirement(question) == "problem_episode"
+        else "continue"
+    )
+
+
 def conditional_module_skip_index(
     questions: list[dict],
     decision: Optional["TurnDecision"],
@@ -713,6 +807,7 @@ class TurnDecision:
     question: Optional[int] = None
     intent: Optional[str] = None
     resolved: dict[str, str] = field(default_factory=dict)
+    evidence_sources: dict[str, str] = field(default_factory=dict)
     focal_entity: Optional[str] = None
     provenance: Optional[str] = None
     not_applicable_question: Optional[int] = None
@@ -733,7 +828,89 @@ class TurnReview:
 
 def _intent_component(value: object, fallback: str) -> str:
     cleaned = _INTENT_COMPONENT_RE.sub("_", str(value or "").strip().lower())
+    # Copy-card UIs historically produced ids such as ``need_copy_copy``.
+    # Treat those as the same semantic card at runtime even before a researcher
+    # opens the composer and accepts its deterministic id migration.
+    cleaned = re.sub(r"(?:_copy(?:_\d+)?)+$", "", cleaned).strip("_")
     return cleaned.strip("_") or fallback
+
+
+_SEMANTIC_STOPWORDS = {
+    "a", "about", "an", "and", "are", "as", "at", "be", "can", "could",
+    "did", "do", "does", "for", "from", "had", "has", "have", "how", "i",
+    "if", "in", "is", "it", "me", "of", "on", "one", "or", "please",
+    "that", "the", "their", "then", "there", "they", "this", "to", "was",
+    "were", "what", "when", "where", "which", "who", "why", "with", "would",
+    "you", "your",
+}
+_SEMANTIC_EQUIVALENTS = {
+    "wanted": "need", "want": "need", "wish": "need", "needed": "need",
+    "needs": "need", "improved": "improve", "improvement": "improve",
+    "differently": "improve", "better": "improve", "job": "task",
+    "work": "task", "works": "task", "result": "output", "results": "output",
+    "answer": "output", "answers": "output", "issue": "problem",
+    "issues": "problem", "failed": "failure", "fails": "failure",
+}
+
+
+def _semantic_question_tokens(value: object) -> set[str]:
+    tokens = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    normalized: set[str] = set()
+    for token in tokens:
+        if token in _SEMANTIC_STOPWORDS:
+            continue
+        token = _SEMANTIC_EQUIVALENTS.get(token, token)
+        if len(token) > 5 and token.endswith("ing"):
+            token = token[:-3]
+        elif len(token) > 4 and token.endswith("ed"):
+            token = token[:-2]
+        elif len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        normalized.add(_SEMANTIC_EQUIVALENTS.get(token, token))
+    return normalized
+
+
+def questions_semantically_duplicate(first: dict, second: dict) -> bool:
+    """Conservatively identify duplicated main-card intent.
+
+    Exact wording is always a duplicate. Paraphrases require at least four
+    meaningful tokens and high overlap; shared target ids lower the threshold
+    slightly because the researcher declared the same analytic construct.
+    """
+    first_text = " ".join(str(first.get("text") or "").lower().split())
+    second_text = " ".join(str(second.get("text") or "").lower().split())
+    if first_text and first_text == second_text:
+        return True
+    left = _semantic_question_tokens(first_text)
+    right = _semantic_question_tokens(second_text)
+    if min(len(left), len(right)) < 4:
+        return False
+    intersection = len(left & right)
+    union = len(left | right)
+    jaccard = intersection / union if union else 0.0
+    containment = intersection / min(len(left), len(right))
+    first_targets = {str(value) for value in first.get("target_ids") or []}
+    second_targets = {str(value) for value in second.get("target_ids") or []}
+    shares_target = bool(first_targets & second_targets)
+    return jaccard >= 0.72 or containment >= 0.88 or (
+        shares_target and jaccard >= 0.56 and containment >= 0.75
+    )
+
+
+def interview_guide_quality_warnings(guide: dict) -> list[str]:
+    """Return deterministic authoring warnings that should not rely on an LLM."""
+    questions = [q for q in (guide or {}).get("questions") or [] if isinstance(q, dict)]
+    warnings: list[str] = []
+    for later in range(1, len(questions)):
+        for earlier in range(later):
+            if questions_semantically_duplicate(questions[earlier], questions[later]):
+                warnings.append(
+                    "Questions "
+                    f"{earlier + 1} and {later + 1} appear to ask for the same "
+                    "evidence. Merge them or make the later evidence gap explicit."
+                )
+                break
+    return warnings
 
 
 def question_intents(question: dict, index: int) -> dict[str, object]:
@@ -851,6 +1028,12 @@ def parse_turn_decision(payload: str) -> Optional[TurnDecision]:
             normalized = str(status).strip().lower()
             if normalized in _RESOLUTION_STATUSES:
                 resolved[str(evidence_id).strip()] = normalized
+    evidence_sources: dict[str, str] = {}
+    if isinstance(raw.get("evidence_sources"), dict):
+        for evidence_id, excerpt in raw["evidence_sources"].items():
+            cleaned = " ".join(str(excerpt or "").split()).strip()
+            if cleaned:
+                evidence_sources[str(evidence_id).strip()] = cleaned[:240]
     focal_entity = raw.get("focal_entity")
     if focal_entity is not None:
         focal_entity = str(focal_entity).strip()[:80] or None
@@ -872,6 +1055,7 @@ def parse_turn_decision(payload: str) -> Optional[TurnDecision]:
         question=question,
         intent=intent,
         resolved=resolved,
+        evidence_sources=evidence_sources,
         focal_entity=focal_entity,
         provenance=provenance,
         not_applicable_question=not_applicable_question,
@@ -904,6 +1088,11 @@ def strip_control_markers(
     """Strip every model control tag before participant display or speech."""
     cleaned, decision = strip_turn_marker(text)
     cleaned, marker = strip_progress_marker(cleaned)
+    if marker is not None or decision is not None:
+        # A model may add one extra closing bracket to a hidden tag. The
+        # normal tag regex removes the tag and leaves a lone "]" before the
+        # first visible sentence; that artifact must not reach participants.
+        cleaned = re.sub(r"^\s*\]{1,2}\s*", "", cleaned, count=1)
     return cleaned, marker, decision
 
 
@@ -915,6 +1104,8 @@ def format_turn_marker(decision: TurnDecision) -> str:
         "intent": decision.intent,
         "resolved": decision.resolved,
     }
+    if decision.evidence_sources:
+        payload["evidence_sources"] = decision.evidence_sources
     if decision.focal_entity:
         payload["focal_entity"] = decision.focal_entity
     if decision.provenance:
@@ -961,6 +1152,14 @@ def turn_decision_instruction(
     skip_answered_questions: bool = True,
 ) -> str:
     """Prompt fragment for same-call evidence state, hidden from participants."""
+    external_override_rule = (
+        "If the conversation includes an `AUTHORITATIVE EVIDENCE STATE` "
+        "control note, an independent judge has already graded the latest "
+        "participant answer. That note overrides your own coverage judgment. "
+        "Use its ledger for navigation and missing-detail wording, and emit "
+        "empty `resolved` and `evidence_sources` objects; the server will "
+        "attach the accepted updates after reviewing your turn."
+    )
     conditional_questions = [
         index + 1
         for index, question in enumerate(questions)
@@ -990,7 +1189,7 @@ def turn_decision_instruction(
 ### Turn decision marker (hidden, required on EVERY response)
 Before the visible words of every response, emit exactly one compact JSON
 marker on one line:
-[[TURN {{"action":"main|clarify|close","question":2,"intent":"a main intent ID below or null","resolved":{{}},"focal_entity":null,"provenance":"unknown","not_applicable_question":null}}]]
+[[TURN {{"action":"main|clarify|close","question":2,"intent":"a main intent ID below or null","resolved":{{}},"evidence_sources":{{}},"focal_entity":null,"provenance":"unknown","not_applicable_question":null}}]]
 
 This marker is private control data and is automatically removed. Use
 `action="main"` only for the next predefined main question, in guide order.
@@ -1027,7 +1226,7 @@ Allowed main intent IDs:
 ### Turn decision marker (hidden, required on EVERY response)
 Before the visible words of every response, emit exactly one compact JSON
 marker on one line:
-[[TURN {{"action":"main|probe|clarify|close","question":2,"intent":"an allowed intent ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"focal_entity":"optional short non-identifying task label","provenance":"direct|second_hand|opinion|mixed|unknown","not_applicable_question":null}}]]
+[[TURN {{"action":"main|probe|clarify|close","question":2,"intent":"an allowed intent ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"evidence_sources":{{"evidence_id":"short exact excerpt from the participant"}},"focal_entity":"optional short non-identifying task label","provenance":"direct|second_hand|opinion|mixed|unknown","not_applicable_question":null}}]]
 
 This marker is private control data and is automatically removed. Follow-up
 probing is disabled, but evidence-aware skipping is enabled. Report explicit
@@ -1036,6 +1235,11 @@ evidence item `covered` only when the answer supplies concrete, analyzable
 detail; a mention or inference is only `partial`. A future question may be
 skipped only when EVERY one of its evidence items is `covered`. Questions
 marked protected must always be asked, even if their evidence appeared early.
+For every newly `covered` or `partial` item, put the shortest useful exact
+supporting excerpt from the participant's latest answer in `evidence_sources`
+under the same evidence ID. Never paraphrase or invent this excerpt.
+
+{external_override_rule}
 
 Before choosing the next question, perform a mandatory coverage audit of the
 participant's latest answer against EVERY evidence ID below. Record every
@@ -1056,6 +1260,10 @@ to move past one or more cards. Use `action="clarify"` only for a participant's
 procedural or scope interruption. Answer briefly, ask whether they would like
 to continue or have another question, and STOP; do not resume the guide in the
 same turn. Use `close` only when no required card remains.
+When the missing-evidence clarification relies on information from an earlier
+participant answer rather than the immediately preceding one, begin with one
+short neutral clause recalling a concrete `evidence_sources` detail. Never
+mention evidence, criteria, fields, or interview mechanics to the participant.
 
 {applicability_rule}
 
@@ -1092,11 +1300,13 @@ Allowed intents and evidence IDs:
 ### Turn decision marker (hidden, required on EVERY response)
 Before the visible words of every response, emit exactly one compact JSON
 marker on one line:
-[[TURN {{"action":"main|probe|thread|clarify|close","question":2,"intent":"an ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"focal_entity":"optional non-identifying label","provenance":"direct|second_hand|opinion|mixed|unknown","not_applicable_question":null}}]]
+[[TURN {{"action":"main|probe|thread|clarify|close","question":2,"intent":"an ID below or null","resolved":{{"evidence_id":"covered|partial|unknown|declined|not_applicable"}},"evidence_sources":{{"evidence_id":"short exact excerpt from the participant"}},"focal_entity":"optional non-identifying label","provenance":"direct|second_hand|opinion|mixed|unknown","not_applicable_question":null}}]]
 
 This marker is private control data and is automatically removed before the
 participant sees or hears the response. Put nothing before it, never mention
 it, and do not wrap it in Markdown. Use strict JSON with double quotes.
+
+{external_override_rule}
 
 {applicability_rule}
 
@@ -1121,6 +1331,12 @@ Decision rules:
   ending in `:e1`, `:e2`, and so on). Never put a main intent, probe intent,
   research target ID, evidence description, or newly invented ID there. For
   example: `"resolved":{{"recent_event:e1":"covered"}}`.
+- For every `covered` or `partial` item newly supported by the participant's
+  latest answer, add the same ID to `evidence_sources`. Its value must be the
+  shortest useful EXACT excerpt from that answer that supports the status,
+  normally 3–18 words. Never paraphrase, repair grammar, or invent a quote.
+  Omit a source rather than guessing. The server links an accepted excerpt to
+  the participant turn so later questions can recall what was already said.
 - Keep `resolved` sparse. Omit evidence that has not been mentioned; do not
   inventory every unasked goal. Sparse does NOT mean omitting supported future
   evidence: include every ID explicitly supported by the latest answer. Before
@@ -1194,6 +1410,19 @@ Decision rules:
   question using `action="probe"`, that question's number, and one of its
   probe/emergent intent IDs. This is an in-order focused advance, not a second
   thread. It is the preferred way to resume after a thread or a rambling answer.
+- MANDATORY CONTINUITY BRIDGE: when entering a question whose evidence was
+  partly supplied in an EARLIER participant turn (not their immediately prior
+  answer), make that memory visible. Begin with one short, neutral clause using
+  a concrete detail from the earlier `evidence_sources`, then ask for exactly
+  one important missing evidence item. For example: "Earlier, you
+  mentioned giving it two example sites. What instructions did you give it
+  about the intended audience?" Never say that they "answered part of the next
+  question," "satisfied criteria," or that "we still need" fields from them.
+  This bridge is required even when the bare listed probe would be shorter. If
+  the supporting detail was in the immediately preceding answer, prefer a short
+  connective such as "And what happened next?" over repeating it back.
+  Do not add an acknowledgement when it would be redundant, evaluative, or
+  longer than the question itself.
 - If one unusually rich early answer appears to cover most of the interview,
   do not replay the broad main questions—but also do not jump straight to the
   participant-led closing. Ask one focused `thread` about the most important
@@ -1351,6 +1580,20 @@ def build_structured_prompt(
 
         guide_lines.append(f"### Question {i} of {len(questions)}")
         guide_lines.append(f"Main question: {text}")
+        wording_by_use = q.get("main_wording_by_ai_use") or {}
+        if wording_by_use:
+            guide_lines.append(
+                "Choose one main wording from the participant's warm-up answer. "
+                "Never read both alternatives or append unused alternatives:"
+            )
+            if wording_by_use.get("uses_ai"):
+                guide_lines.append(
+                    f"  Reports AI use: {wording_by_use['uses_ai']}"
+                )
+            if wording_by_use.get("no_ai_use"):
+                guide_lines.append(
+                    f"  Reports no AI use: {wording_by_use['no_ai_use']}"
+                )
         guide_lines.append(f"Main intent ID: {intents['main']}")
         if q.get("module"):
             guide_lines.append(f"Module: {q['module']}")
@@ -1359,6 +1602,16 @@ def build_structured_prompt(
                 "Applicability rule: if the participant explicitly answers "
                 "none or says this does not apply, skip the remaining "
                 "consecutive questions in this module."
+            )
+        if question_answer_requirement(q) == "problem_episode":
+            guide_lines.append(
+                "Answer requirement (server-enforced): the participant must "
+                "describe a real problem, limitation, or shortfall in the "
+                "episode. Do not treat mere AI use as a qualifying failure."
+            )
+            guide_lines.append(
+                "Requirement-miss route: "
+                + question_requirement_miss_action(q)
             )
         if q.get("always_ask"):
             guide_lines.append(
@@ -1387,6 +1640,9 @@ def build_structured_prompt(
             guide_lines.append("Evidence to seek and resolve:")
             for evidence_id, goal in intents["evidence"].items():
                 guide_lines.append(f"  {evidence_id}: {goal}")
+                mapped = (q.get("evidence_probes") or {}).get(evidence_id.rsplit(":", 1)[-1])
+                if mapped:
+                    guide_lines.append(f"    Authored missing-evidence probe: {mapped}")
         if q.get("do_not_assume"):
             guide_lines.append(
                 "Do not assume or imply: " + "; ".join(q["do_not_assume"])
@@ -1409,6 +1665,20 @@ def build_structured_prompt(
                 )
             for j, (probe_id, p) in enumerate(intents["probes"].items(), 1):
                 guide_lines.append(f"  {j}. {p} [intent ID: {probe_id}]")
+            probe_wording_by_use = q.get("probe_wording_by_ai_use") or {}
+            if probe_wording_by_use:
+                guide_lines.append(
+                    "For a follow-up on this card, choose only the wording "
+                    "that matches the participant's warm-up AI-use answer:"
+                )
+                if probe_wording_by_use.get("uses_ai"):
+                    guide_lines.append(
+                        f"  Reports AI use: {probe_wording_by_use['uses_ai']}"
+                    )
+                if probe_wording_by_use.get("no_ai_use"):
+                    guide_lines.append(
+                        f"  Reports no AI use: {probe_wording_by_use['no_ai_use']}"
+                    )
         guide_lines.append(
             f"Maximum follow-ups for this question: {max_fu}. This is a "
             "ceiling, not a target. Move on sooner when the evidence goal is "
@@ -1497,8 +1767,20 @@ Hard rules:
   accurately explain your role or why the research team values the
   participant's perspective.
 - Show that you listened through a brief content-grounded acknowledgement or
-  by using the participant's own words in the next question. Avoid generic
-  social filler, repeated paraphrases, canned praise, and false intimacy.
+  by using the participant's own words in the next question. When a later card
+  was partly answered earlier, acknowledge at most one specific remembered
+  detail and ask only for the most important missing part. Avoid generic social
+  filler, repeated paraphrases, canned praise, and false intimacy.
+- An example already supplied is not missing merely because its implication
+  is unclear. Ask about the missing reason, consequence, or boundary instead
+  of asking for the same example again. Use authored evidence-specific probes.
+- Before changing topics after an account of a death, significant personal loss,
+  or explicitly distressing experience, include one brief neutral acknowledgment
+  of a concrete fact the participant actually shared. Then ask the appropriate
+  guide question. Do not infer a feeling, praise coping, or offer therapy. This
+  short acknowledgment is allowed before a main question as well as a probe;
+  it does not add a second question. Offer a pause if distress is expressed,
+  and always respect a request to stop. Do not repeat acknowledgments routinely.
 - When leaving the warm-up, give one short, transparent signpost before the
   first core question. If the next topic is sensitive, remind the participant
   that they control what they share. Do not narrate ordinary question changes.
@@ -1509,6 +1791,13 @@ Hard rules:
   its intent elsewhere. When evidence-aware skipping is enabled, protected
   anchors still must be asked and only fully covered unprotected cards may be
   skipped.
+- Validate the kind of episode before inheriting its premise. If a card asks
+  for a failure, concern, difficulty, or success, distinguish a matching
+  episode from mere use of the topic. Do not ask downstream questions such as
+  "after it failed" when the participant has only described a successful or
+  ambiguous use. For a server-enforced problem-episode requirement, ask one
+  neutral fit repair and follow the authored route if no qualifying example
+  exists; never pressure the participant to manufacture one.
 - Preserve momentum without surrendering the guide. If a participant gives a
   long, haphazard answer spanning several topics, silently update all supported
   evidence states, briefly ground the next turn in their most relevant exact
@@ -1580,9 +1869,11 @@ Hard rules:
   test such as "under what conditions would you let AI decide that?" Ask why
   the participant retained the decision in the episode they described. Save
   future hypotheticals for the guide's explicit future-workflow question.
-- Do NOT acknowledge or evaluate answers ("great", "interesting",
-  "that's helpful"). A neutral "Mm-hm." or going straight to the next
-  probe is correct. Validation biases the participant.
+- Do NOT praise or evaluate answers with generic approval ("great",
+  "interesting", "that's helpful"). A neutral content bridge that demonstrates
+  memory is not praise and is allowed. A brief "Mm-hm." or going straight to
+  the next probe is also correct when repeating the content would feel
+  unnatural.
 - Apart from the one warm-up-to-core signpost or a sensitive-topic warning,
   do NOT narrate mechanics ("now I'll ask a follow-up", "transitioning").
 - When you reach the maximum follow-ups for a question, move on to the
@@ -1647,6 +1938,23 @@ task in the next question so references such as "that task" stay unambiguous.
             questions, allow_follow_ups, skip_answered_questions
         )
         prompt += progress_marker_instruction(len(questions))
+    if guide.get("allow_story_follow_up") and allow_follow_ups:
+        prompt += """
+
+### RESEARCHER-APPROVED SINGLE STORY FOLLOW-UP
+One time in this interview, when the participant has volunteered a concrete,
+personally significant story, you may stay with it for one relevant question
+before returning to the guide. Prefer this to an abrupt topic switch after a
+loss story. Use action="thread" with a downstream non-sensitive card's listed
+probe intent whose evidence the story already supports. You may adapt that
+probe to one concrete participant detail; ask one neutral question under 32
+words. Do not invent a feeling or request identifying details. This option
+also permits one depth question when that target is covered, without requiring
+most of the entire interview to be covered. Never reopen declined or unknown
+material. Do not chain detours: after its answer return to the normal in-order
+guide path, skipping only genuinely covered cards. The usual follow-up and
+time limits still apply. This is permission, not a requirement after every story.
+"""
     return prompt
 
 
@@ -2024,8 +2332,10 @@ class EvidenceStateTracker:
         skip_answered_questions: bool = True,
         allow_coverage_clarifications: bool = False,
         allow_threading: bool = True,
+        allow_story_follow_up: bool = False,
         language: str = "en",
         orchestration_profile: str = "semi_structured",
+        max_quality_repairs: int = 3,
     ):
         self._questions = questions
         self._closing = closing
@@ -2039,12 +2349,24 @@ class EvidenceStateTracker:
             allow_coverage_clarifications
         )
         self._allow_threading = bool(allow_threading)
+        self._allow_story_follow_up = bool(allow_story_follow_up and allow_threading and allow_follow_ups)
+        self._story_followups_accepted = 0
         self._language = language or "en"
         self._orchestration_profile = orchestration_profile
+        self._max_quality_repairs = max(0, int(max_quality_repairs))
         self._catalog = [
             question_intents(question, index)
             for index, question in enumerate(questions)
         ]
+        self._evidence_metadata = {
+            evidence_id: {
+                "question_id": str(catalog["question_id"]),
+                "question_number": index + 1,
+                "criterion": str(goal),
+            }
+            for index, catalog in enumerate(self._catalog)
+            for evidence_id, goal in catalog["evidence"].items()
+        }
         self._question_positions = {
             str(question.get("id")): index
             for index, question in enumerate(questions)
@@ -2056,6 +2378,7 @@ class EvidenceStateTracker:
             for evidence_id in catalog["evidence"]
         }
         self._asked_intents: set[str] = set()
+        self._asked_main_indices: set[int] = set()
         self._resolutions: dict[str, str] = {}
         self._events: list[dict[str, object]] = []
         self._missing_decisions = 0
@@ -2081,12 +2404,428 @@ class EvidenceStateTracker:
         self._probe_policy_corrections = 0
         self._probe_wording_corrections = 0
         self._adaptive_probe_wording_accepted = 0
+        self._acknowledged_probe_wording_accepted = 0
+        self._continuity_bridges_added = 0
+        self._continuity_bridged_questions: set[int] = set()
         self._emergent_probes_blocked = 0
         self._answer_repairs_accepted = 0
         self._answer_repairs_blocked = 0
+        self._requirement_repairs: set[int] = set()
+        self._requirements_satisfied: set[int] = set()
+        self._requirements_met = 0
+        self._requirements_missed = 0
+        self._requirement_miss_closures = 0
+        self._semantic_duplicate_mains_blocked = 0
         self._clarification_misclassifications_blocked = 0
         self._latest_focal_entity: Optional[str] = None
         self._latest_provenance: Optional[str] = None
+        self._reported_ai_use: Optional[bool] = None
+        # Evidence status alone is enough to skip a card, but not enough to
+        # explain the skip or let a later question refer naturally to what the
+        # participant already said. Keep a bounded, turn-linked support ledger.
+        # The full transcript remains the source of truth; these records only
+        # point back to it and retain a short preview/exact supporting excerpt.
+        self._participant_turns: list[dict[str, object]] = []
+        self._participant_turn_counter = 0
+        self._active_source_turn: Optional[dict[str, object]] = None
+        self._evidence_records: dict[str, dict[str, object]] = {}
+        self._last_resolution_delta: dict[str, str] = {}
+        self._last_source_delta: dict[str, str] = {}
+        self._invalid_evidence_source_excerpts = 0
+        self._external_judgment_pending = False
+        self._evidence_judge_calls = 0
+        self._evidence_judge_failures = 0
+        self._evidence_judgments_accepted = 0
+        self._evidence_judgments_rejected = 0
+        self._review_uses_authoritative_evidence = False
+        self._review_current_index = 0
+
+    @staticmethod
+    def _normalized_source_text(value: object) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    @staticmethod
+    def _response_preview(value: object, limit: int = 280) -> str:
+        cleaned = " ".join(str(value or "").split()).strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 1].rstrip() + "…"
+
+    def _remember_participant_turn(
+        self, participant_text: str, participant_sequence: Optional[int]
+    ) -> Optional[dict[str, object]]:
+        cleaned = " ".join(str(participant_text or "").split()).strip()
+        if not cleaned:
+            self._active_source_turn = None
+            return None
+
+        sequence: Optional[int] = None
+        if participant_sequence is not None:
+            try:
+                sequence = int(participant_sequence)
+            except (TypeError, ValueError):
+                sequence = None
+        if sequence is not None:
+            for remembered in reversed(self._participant_turns):
+                if remembered["turn_sequence"] == sequence:
+                    self._active_source_turn = remembered
+                    return remembered
+
+        self._participant_turn_counter += 1
+        remembered = {
+            "participant_turn": self._participant_turn_counter,
+            "turn_sequence": sequence or self._participant_turn_counter,
+            "response_excerpt": self._response_preview(cleaned),
+            # Internal-only full text supports exact-quote validation. It is
+            # deliberately omitted from the persisted evidence ledger.
+            "_text": cleaned,
+        }
+        self._participant_turns.append(remembered)
+        # Bound in-memory lookup cost during unusually long panel sessions.
+        if len(self._participant_turns) > 100:
+            self._participant_turns = self._participant_turns[-100:]
+        self._active_source_turn = remembered
+        return remembered
+
+    def _source_for_resolution(
+        self, decision: TurnDecision, evidence_id: str
+    ) -> tuple[Optional[dict[str, object]], Optional[str]]:
+        requested = " ".join(
+            str(decision.evidence_sources.get(evidence_id) or "").split()
+        ).strip()
+        if requested:
+            normalized = self._normalized_source_text(requested)
+            for remembered in reversed(self._participant_turns):
+                if normalized in self._normalized_source_text(remembered["_text"]):
+                    return remembered, requested
+            self._invalid_evidence_source_excerpts += 1
+        return None, None
+
+    def _record_resolution_source(
+        self,
+        evidence_id: str,
+        status: str,
+        decision: TurnDecision,
+        prior_status: Optional[str] = None,
+    ) -> None:
+        metadata = self._evidence_metadata.get(evidence_id)
+        if metadata is None:
+            return
+        record = self._evidence_records.setdefault(
+            evidence_id,
+            {
+                "evidence_id": evidence_id,
+                **metadata,
+                "status": status,
+                "sources": [],
+            },
+        )
+        record["status"] = status
+        remembered, exact_excerpt = self._source_for_resolution(
+            decision, evidence_id
+        )
+        # A newly accepted item or a real status change is attributable to the
+        # current response even if the model omitted its optional exact excerpt.
+        # A repeated status without an excerpt is only state restatement; never
+        # misattribute it to the newest response.
+        if remembered is None and prior_status != status:
+            remembered = self._active_source_turn
+        if remembered is not None:
+            source = {
+                "participant_turn": remembered["participant_turn"],
+                "turn_sequence": remembered["turn_sequence"],
+                "response_excerpt": remembered["response_excerpt"],
+            }
+            if exact_excerpt:
+                source["evidence_excerpt"] = exact_excerpt
+                self._last_source_delta[evidence_id] = exact_excerpt
+            sources = record["sources"]
+            signature = (
+                source["turn_sequence"],
+                source.get("evidence_excerpt"),
+                status,
+            )
+            if not any(
+                (
+                    existing.get("turn_sequence"),
+                    existing.get("evidence_excerpt"),
+                    existing.get("status"),
+                )
+                == signature
+                for existing in sources
+            ):
+                source["status"] = status
+                sources.append(source)
+                del sources[:-3]
+        self._last_resolution_delta[evidence_id] = status
+
+    def attach_evidence_delta(self, review: TurnReview) -> TurnReview:
+        """Keep only server-accepted evidence in model-visible TURN history."""
+        if review.decision is None:
+            return review
+        contextual = replace(
+            review.decision,
+            resolved=dict(self._last_resolution_delta),
+            evidence_sources=dict(self._last_source_delta),
+        )
+        return replace(review, decision=contextual)
+
+    def evidence_ledger(self) -> dict[str, object]:
+        """Return auditable per-question coverage without duplicating transcripts."""
+        questions: list[dict[str, object]] = []
+        for index, catalog in enumerate(self._catalog):
+            evidence: list[dict[str, object]] = []
+            for evidence_id, criterion in catalog["evidence"].items():
+                record = self._evidence_records.get(evidence_id)
+                evidence.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "criterion": str(criterion),
+                        "status": (
+                            str(record["status"]) if record else "missing"
+                        ),
+                        "sources": list(record["sources"]) if record else [],
+                        "missing_facets": (
+                            list(record.get("missing_facets") or [])
+                            if record
+                            else []
+                        ),
+                        "judge_confidence": (
+                            record.get("judge_confidence") if record else None
+                        ),
+                        "judged_by": record.get("judged_by") if record else None,
+                        "revision_count": int(record.get("revision_count", 0)) if record else 0,
+                    }
+                )
+            remaining = [
+                item["evidence_id"]
+                for item in evidence
+                if item["status"] in {"missing", "partial"}
+            ]
+            questions.append(
+                {
+                    "question_id": str(catalog["question_id"]),
+                    "question_number": index + 1,
+                    "evidence": evidence,
+                    "remaining_evidence_ids": remaining,
+                    "supported_evidence_ids": [item["evidence_id"] for item in evidence if item["status"] == "covered"],
+                    "terminal_nonanswer_ids": [item["evidence_id"] for item in evidence
+                                               if item["status"] in {"unknown", "declined", "not_applicable"}],
+                    "coverage_status": (
+                        "complete"
+                        if evidence and not remaining
+                        else "partial"
+                        if any(item["status"] != "missing" for item in evidence)
+                        else "unanswered"
+                    ),
+                }
+            )
+        return {"version": 1, "questions": questions}
+
+    @property
+    def needs_evidence_judge(self) -> bool:
+        """Whether evidence state can affect navigation for this guide."""
+        return bool(self._valid_evidence) and (
+            self._skip_answered_questions or self._allow_follow_ups
+        )
+
+    def evidence_judge_context(self, current_index: int, participant_text: str = "") -> dict[str, object]:
+        """Return unresolved criteria plus bounded accepted support.
+
+        Covered evidence is reconsidered only on an explicit revision turn.
+        Refusals remain closed. Partial evidence can be completed normally.
+        """
+        candidates: list[dict[str, object]] = []
+        terminal = {"covered", "unknown", "declined", "not_applicable"}
+        for index, catalog in enumerate(self._catalog):
+            for evidence_id, criterion in catalog["evidence"].items():
+                status = self._resolutions.get(evidence_id, "missing")
+                revision_only = status == "covered" and bool(_EVIDENCE_REVISION_RE.search(participant_text))
+                if status in terminal and not revision_only:
+                    continue
+                record = self._evidence_records.get(evidence_id) or {}
+                prior_support = []
+                sources = list(record.get("sources") or [])
+                # Retain old attribution in the ledger, but do not feed a
+                # superseded claim back to the judge as accepted support.
+                revision_start = next((i for i in range(len(sources) - 1, -1, -1)
+                                       if sources[i].get("revises_prior")), 0)
+                for source in sources[revision_start:][-2:]:
+                    excerpt = source.get("evidence_excerpt") or source.get(
+                        "response_excerpt"
+                    )
+                    if excerpt:
+                        prior_support.append(str(excerpt)[:280])
+                candidates.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "question_number": index + 1,
+                        "question_text": str(self._questions[index].get("text") or ""),
+                        "criterion": str(criterion),
+                        "prior_status": status,
+                        "prior_support": prior_support,
+                        "is_current_question": index == current_index,
+                        "revision_only": revision_only,
+                    }
+                )
+        return {
+            "current_question_number": (
+                current_index + 1 if 0 <= current_index < len(self._catalog) else None
+            ),
+            "candidates": candidates,
+        }
+
+    def prepare_external_judgment(
+        self,
+        *,
+        participant_text: str,
+        participant_sequence: Optional[int],
+        current_index: int,
+        resolutions: dict[str, str],
+        evidence_sources: dict[str, str],
+        missing_facets: dict[str, list[str]],
+        confidences: dict[str, float],
+        judge_model: str,
+        failed: bool = False,
+    ) -> dict[str, object]:
+        """Apply one independent judge result before next-turn generation.
+
+        Only a status with a quote found in the latest participant answer is
+        accepted. The subsequent interviewer decision may choose wording and
+        navigation, but its own semantic resolutions are ignored.
+        """
+        self._last_resolution_delta = {}
+        self._last_source_delta = {}
+        self._review_current_index = current_index
+        remembered = self._remember_participant_turn(
+            participant_text, participant_sequence
+        )
+        self._external_judgment_pending = True
+        self._evidence_judge_calls += 1
+        if failed:
+            self._evidence_judge_failures += 1
+            return {
+                "accepted_resolutions": {},
+                "accepted_sources": {},
+                "ledger": self.evidence_ledger(),
+            }
+
+        latest_normalized = self._normalized_source_text(
+            remembered.get("_text") if remembered else participant_text
+        )
+        current_evidence = (
+            set(self._catalog[current_index]["evidence"])
+            if 0 <= current_index < len(self._catalog)
+            else set()
+        )
+        allowed_statuses = {
+            "covered",
+            "partial",
+            "unknown",
+            "declined",
+            "not_applicable",
+        }
+        terminal_statuses = {"unknown", "declined", "not_applicable"}
+
+        for evidence_id, status in resolutions.items():
+            quote = " ".join(
+                str(evidence_sources.get(evidence_id) or "").split()
+            ).strip()
+            quote_is_latest = bool(
+                quote
+                and self._normalized_source_text(quote) in latest_normalized
+            )
+            terminal_is_explicit = True
+            if status in terminal_statuses:
+                pattern = _TERMINAL_STATUS_PATTERNS.get(status)
+                terminal_is_explicit = bool(
+                    evidence_id in current_evidence
+                    and pattern is not None
+                    and pattern.search(participant_text or "")
+                )
+            if (
+                evidence_id not in self._valid_evidence
+                or status not in allowed_statuses
+                or not quote_is_latest
+                or not terminal_is_explicit
+            ):
+                self._evidence_judgments_rejected += 1
+                if quote and not quote_is_latest:
+                    self._invalid_evidence_source_excerpts += 1
+                continue
+
+            prior_status = self._resolutions.get(evidence_id)
+            is_revision = (
+                prior_status == "covered"
+                and bool(_EVIDENCE_REVISION_RE.search(quote))
+                and float(confidences.get(evidence_id) or 0) >= 0.85
+            )
+            if prior_status == "covered" and not is_revision:
+                # revision_only candidates do not permit re-grading old
+                # claims using unrelated new material.
+                continue
+            if status == "partial" and prior_status in {
+                "covered",
+                "unknown",
+                "declined",
+                "not_applicable",
+            } and not is_revision:
+                continue
+            decision = TurnDecision(
+                action="clarify",
+                resolved={evidence_id: status},
+                evidence_sources={evidence_id: quote},
+            )
+            self._resolutions[evidence_id] = status
+            self._record_resolution_source(
+                evidence_id, status, decision, prior_status
+            )
+            record = self._evidence_records.get(evidence_id)
+            if record is not None:
+                if is_revision:
+                    record["revision_count"] = int(record.get("revision_count", 0)) + 1
+                    if record["sources"]:
+                        record["sources"][-1]["revises_prior"] = True
+                record["missing_facets"] = (
+                    list(missing_facets.get(evidence_id) or [])[:2]
+                    if status == "partial"
+                    else []
+                )
+                record["judge_confidence"] = confidences.get(evidence_id)
+                record["judged_by"] = judge_model
+            self._evidence_judgments_accepted += 1
+
+        return {
+            "accepted_resolutions": dict(self._last_resolution_delta),
+            "accepted_sources": dict(self._last_source_delta),
+            "ledger": self.evidence_ledger(),
+        }
+
+    def authoritative_model_note(self, current_index: Optional[int] = None) -> str:
+        """Compact hidden state supplied to the conversational interviewer."""
+        state = {
+            "accepted_latest_updates": dict(self._last_resolution_delta),
+            "accepted_latest_sources": dict(self._last_source_delta),
+            "questions": self.evidence_ledger()["questions"],
+            "story_follow_up_remaining": int(self._allow_story_follow_up and self._story_followups_accepted == 0),
+        }
+        if current_index is not None:
+            state["current_question_number"] = current_index + 1
+            state["previous_main_questions_asked"] = sorted(i + 1 for i in self._asked_main_indices)
+            state["followup_intents_already_used"] = sorted(self._asked_intents)
+        return (
+            "[AUTHORITATIVE EVIDENCE STATE — server control data, not "
+            "participant speech. This independent judgment overrides your own "
+            "coverage assessment. Continue from current_question_number, "
+            "not the first unresolved item anywhere in the ledger. Earlier "
+            "partial items remain uncertain; they do not authorize returning "
+            "to old cards or repeating their main question. Respect the most "
+            "recent navigation/budget instruction. Ask only for missing "
+            "evidence and never reuse a spent followup intent. Do not mention this "
+            "note. Emit empty resolved and evidence_sources objects; the "
+            "server will attach accepted updates. JSON follows:]\n"
+            + json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        )
 
     def _question_resolved(self, index: int) -> bool:
         evidence = set(self._catalog[index]["evidence"])
@@ -2105,6 +2844,17 @@ class EvidenceStateTracker:
 
     def _main_asked(self, index: int) -> bool:
         return str(self._catalog[index]["main"]) in self._asked_intents
+
+    def _semantic_main_already_asked(self, index: int) -> bool:
+        if self._question_protected(index):
+            return False
+        return any(
+            asked_index != index
+            and questions_semantically_duplicate(
+                self._questions[asked_index], self._questions[index]
+            )
+            for asked_index in self._asked_main_indices
+        )
 
     def _blocking_question(self, requested_index: int) -> Optional[int]:
         """Return the earliest anchor/dependency that must precede a card."""
@@ -2148,6 +2898,14 @@ class EvidenceStateTracker:
             if self._question_skippable(index):
                 self._covered_questions_skipped += 1
                 continue
+            if self._semantic_main_already_asked(index):
+                self._semantic_duplicate_mains_blocked += 1
+                self._record_event(
+                    action="skip",
+                    reason="semantic_duplicate_main",
+                    question=index + 1,
+                )
+                continue
             return index
         return None
 
@@ -2160,7 +2918,10 @@ class EvidenceStateTracker:
             dependency = self._blocking_question(index)
             if dependency is not None:
                 return dependency
-            if not self._question_skippable(index):
+            if (
+                not self._question_skippable(index)
+                and not self._semantic_main_already_asked(index)
+            ):
                 return index
         return None
 
@@ -2200,7 +2961,22 @@ class EvidenceStateTracker:
     def _available_listed_probe(self, index: int) -> Optional[tuple[str, str]]:
         if not self._allow_follow_ups:
             return None
+        mappings = self._questions[index].get("evidence_probes") or {}
+        variants = self._questions[index].get("probe_wording_by_ai_use") or {}
+        mapped_wording = set(mappings.values()) | set(variants.values())
+        unresolved_wording = {
+            candidate for local_id, wording in mappings.items()
+            if self._resolutions.get(f"{self._catalog[index]['question_id']}:{local_id}")
+            not in {"covered", "unknown", "declined", "not_applicable"}
+            for candidate in {wording, self._ai_use_probe_wording(index, wording)}
+        }
+        selected = self._ai_use_probe_wording(index)
         for intent, text in self._catalog[index]["probes"].items():
+            if selected and text in variants.values() and text != selected:
+                continue
+            if (self._skip_answered_questions and text in mapped_wording
+                    and text not in unresolved_wording):
+                continue
             if intent not in self._asked_intents and str(text).strip():
                 return str(intent), str(text).strip()
         return None
@@ -2232,6 +3008,11 @@ class EvidenceStateTracker:
 
         catalog = self._catalog[question_index]
         intent = decision.intent
+        if (decision.action == "thread" and intent in catalog["probes"]
+                and self._story_follow_up_is_safe(question_index, text, participant_text)):
+            # Final threading validation below still checks target evidence,
+            # anchors, dependency order, intent reuse and the pending detour.
+            return text, decision, False, None
         replacement_intent: Optional[str] = None
         replacement_text: Optional[str] = None
         reason: Optional[str] = None
@@ -2243,7 +3024,86 @@ class EvidenceStateTracker:
             and decision.action == "probe"
         )
         if is_coverage_clarification:
+            continuity_text = self._continuity_bridge_text(
+                question_index, str(text or "").strip(), str(text or "").strip()
+            )
+            if continuity_text is not None:
+                self._continuity_bridges_added += 1
+                self._continuity_bridged_questions.add(question_index)
+                self._record_event(
+                    action="add_continuity_bridge",
+                    question=question_index + 1,
+                    intent=intent,
+                )
+                return (
+                    continuity_text,
+                    decision,
+                    True,
+                    "evidence_continuity_bridge_added",
+                )
             return text, decision, False, None
+        if decision.action == "probe" and intent in catalog["probes"]:
+            variants = self._questions[question_index].get("probe_wording_by_ai_use") or {}
+            selected = self._ai_use_probe_wording(question_index)
+            proposed_probe = catalog["probes"][intent]
+            if selected and proposed_probe in variants.values() and proposed_probe != selected:
+                replacement_intent = next(
+                    (probe_id for probe_id, wording in catalog["probes"].items()
+                     if wording == selected), None
+                )
+                replacement_text = selected
+                reason = "ai_use_probe_wording"
+        if (
+            self._review_uses_authoritative_evidence
+            and decision.action == "probe"
+            and self._question_has_evidence(question_index)
+            and not self._question_resolved(question_index)
+        ):
+            # The independent ledger, not the moderator's chosen listed probe,
+            # determines which detail is still missing. This prevents a model
+            # from asking for instructions again after the judge has already
+            # accepted them while constraints remain partial.
+            authoritative_text = self._fallback_coverage_repair_text(
+                question_index
+            )
+            authoritative_intent = next(
+                (probe_id for probe_id, probe_text in catalog["probes"].items()
+                 if str(probe_text).strip() == authoritative_text), decision.intent
+            )
+            # Correct the question without discarding a safe acknowledgment.
+            # The model may use a slightly different probe paraphrase; the
+            # participant-facing prefix can still be independently valid.
+            prefix_match = re.fullmatch(r"(.+[.!])\s+([^?]+\?)", str(text or "").strip())
+            acknowledged = bool(prefix_match and self._acknowledged_listed_probe_is_safe(
+                f"{prefix_match.group(1)} {authoritative_text}", authoritative_text,
+                participant_text, question_index))
+            if acknowledged:
+                authoritative_text = f"{prefix_match.group(1)} {authoritative_text}"
+                continuity_text = None
+            else:
+                continuity_text = self._continuity_bridge_text(
+                    question_index, authoritative_text, authoritative_text,
+                )
+            if continuity_text is not None:
+                authoritative_text = continuity_text
+                self._continuity_bridges_added += 1
+                self._continuity_bridged_questions.add(question_index)
+            if authoritative_text != str(text or "").strip() or authoritative_intent != decision.intent:
+                self._probe_policy_corrections += 1
+                self._probe_wording_corrections += 1
+                self._record_event(
+                    action="normalize_probe",
+                    reason="authoritative_missing_evidence_probe",
+                    question=question_index + 1,
+                    proposed_intent=decision.intent,
+                    accepted_intent=authoritative_intent,
+                )
+                return (
+                    authoritative_text,
+                    replace(decision, intent=authoritative_intent),
+                    True,
+                    "authoritative_missing_evidence_probe",
+                )
         if intent in catalog["emergent"] and not self._allow_emergent_follow_ups:
             self._emergent_probes_blocked += 1
             reason = "emergent_probes_disabled"
@@ -2260,6 +3120,23 @@ class EvidenceStateTracker:
                 replacement_intent = intent
                 replacement_text = self._listed_probe_text(question_index, intent)
                 proposed_text = str(text or "").strip()
+                continuity_text = self._continuity_bridge_text(
+                    question_index, proposed_text, replacement_text
+                )
+                if continuity_text is not None:
+                    self._continuity_bridges_added += 1
+                    self._continuity_bridged_questions.add(question_index)
+                    self._record_event(
+                        action="add_continuity_bridge",
+                        question=question_index + 1,
+                        intent=intent,
+                    )
+                    return (
+                        continuity_text,
+                        decision,
+                        True,
+                        "evidence_continuity_bridge_added",
+                    )
                 adaptive_wording = (
                     replacement_text != proposed_text
                     and self._orchestration_profile == "exploratory"
@@ -2269,6 +3146,23 @@ class EvidenceStateTracker:
                         proposed_text, participant_text
                     )
                 )
+                acknowledged_wording = (
+                    replacement_text != proposed_text
+                    and self._acknowledged_listed_probe_is_safe(
+                        proposed_text,
+                        replacement_text,
+                        participant_text,
+                        question_index,
+                    )
+                )
+                if acknowledged_wording:
+                    self._acknowledged_probe_wording_accepted += 1
+                    self._record_event(
+                        action="accept_acknowledged_probe",
+                        question=question_index + 1,
+                        intent=intent,
+                    )
+                    return text, decision, False, None
                 if adaptive_wording:
                     self._adaptive_probe_wording_accepted += 1
                     self._record_event(
@@ -2283,11 +3177,29 @@ class EvidenceStateTracker:
         if replacement_intent is None or replacement_text is None:
             return text, decision, False, reason
 
+        # A malformed/emergent intent may be normalized to a listed probe above.
+        # Preserve the same continuity guarantee on that correction path too.
+        if decision.action == "probe":
+            continuity_text = self._continuity_bridge_text(
+                question_index, replacement_text, replacement_text
+            )
+            if continuity_text is not None:
+                replacement_text = continuity_text
+                self._continuity_bridges_added += 1
+                self._continuity_bridged_questions.add(question_index)
+                self._record_event(
+                    action="add_continuity_bridge",
+                    question=question_index + 1,
+                    intent=replacement_intent,
+                )
+                reason = reason or "evidence_continuity_bridge_added"
+
         normalized = TurnDecision(
             action=decision.action,
             question=decision.question,
             intent=replacement_intent,
             resolved=decision.resolved,
+            evidence_sources=decision.evidence_sources,
             focal_entity=decision.focal_entity,
             provenance=decision.provenance,
         )
@@ -2307,6 +3219,143 @@ class EvidenceStateTracker:
                 accepted_intent=replacement_intent,
             )
         return replacement_text, normalized, changed, reason
+
+    @staticmethod
+    def _continuity_fragment(excerpt: str) -> Optional[str]:
+        """Turn an exact participant excerpt into a short neutral recall clause."""
+        cleaned = " ".join(str(excerpt or "").split()).strip(" \t\r\n.?!,;:\"'“”")
+        if not cleaned or len(cleaned.split()) > 18 or any(
+            mark in cleaned for mark in _QUESTION_MARKS
+        ):
+            return None
+        lowered = cleaned.casefold()
+        replacements = (
+            ("i'm ", "that you were "),
+            ("i am ", "that you were "),
+            ("i've ", "that you've "),
+            ("i have ", "that you have "),
+            ("i ", "that you "),
+            ("my ", "your "),
+        )
+        for source, target in replacements:
+            if lowered.startswith(source):
+                remainder = cleaned[len(source) :]
+                if re.search(r"\b(?:i|my|me|we|our|us)\b", remainder, re.IGNORECASE):
+                    return None
+                return target + remainder
+        # Team pronouns cannot be changed safely without knowing whether "we"
+        # meant a household, company, classroom, or something else.
+        if lowered.startswith(("we ", "we've ", "our ", "us ")):
+            return None
+        # A noun label is safe; arbitrary clauses are not. In particular,
+        # "When ... I feel ..." cannot be inserted as indirect speech.
+        if re.search(r"\b(?:i|my|me|we|our|us)\b", lowered):
+            return None
+        if len(cleaned.split()) <= 6 and cleaned[0].isupper() and not re.match(
+            r"(?:when|then|it|that|because|if|after|before)\b", lowered
+        ):
+            return cleaned
+        return None
+
+    def _continuity_bridge_text(
+        self,
+        question_index: int,
+        proposed_text: str,
+        listed_probe: Optional[str],
+    ) -> Optional[str]:
+        """Add one deterministic memory bridge when the model omits it.
+
+        This is limited to an in-order move into a partially answered later
+        card. It never changes the authored probe and never fires for evidence
+        supplied in the immediately preceding participant answer.
+        """
+        if (
+            self._orchestration_profile
+            not in {"repair_only", "semi_structured", "exploratory"}
+            or question_index <= getattr(self, "_review_current_index", 0)
+            or question_index in self._continuity_bridged_questions
+            or not listed_probe
+            or " ".join(proposed_text.split()).casefold()
+            != " ".join(listed_probe.split()).casefold()
+            or self._active_source_turn is None
+        ):
+            return None
+        current_participant_turn = int(
+            self._active_source_turn.get("participant_turn") or 0
+        )
+        candidates: list[tuple[int, int, str]] = []
+        for evidence_id in self._catalog[question_index]["evidence"]:
+            record = self._evidence_records.get(evidence_id) or {}
+            for source in record.get("sources") or []:
+                source_turn = int(source.get("participant_turn") or 0)
+                if source_turn >= current_participant_turn:
+                    continue
+                fragment = self._continuity_fragment(
+                    str(source.get("evidence_excerpt") or "")
+                )
+                if fragment:
+                    # Prefer a recent, informative phrase over a bare label.
+                    candidates.append((source_turn, len(fragment.split()), fragment))
+        if not candidates:
+            return None
+        _, _, fragment = max(candidates)
+        return f"Earlier, you mentioned {fragment}. {listed_probe}".strip()
+
+    def _acknowledged_listed_probe_is_safe(
+        self,
+        proposed_text: str,
+        listed_probe: str,
+        participant_text: str,
+        question_index: int,
+    ) -> bool:
+        """Allow one grounded memory bridge before an unchanged listed probe.
+
+        Semi-structured guides ordinarily use server-owned probe wording. A
+        short declarative acknowledgement does not change that intent, and
+        stripping it made the interviewer appear to ignore prior answers.
+        """
+        proposed = " ".join(str(proposed_text or "").split()).strip()
+        listed = " ".join(str(listed_probe or "").split()).strip()
+        if not proposed or not listed or proposed == listed:
+            return False
+        if not proposed.casefold().endswith(listed.casefold()):
+            return False
+        prefix = proposed[: len(proposed) - len(listed)].strip()
+        if (
+            not prefix
+            or len(prefix.split()) > 24
+            or any(mark in prefix for mark in _QUESTION_MARKS)
+            or not re.match(
+                r"^(?:earlier,?\s+)?you\s+(?:mentioned|said|noted|described)\b|"
+                r"^(?:in|from)\s+(?:that|your)\s+(?:answer|example|account)\b|"
+                r"^given\s+(?:that|what you said)\b",
+                prefix,
+                re.IGNORECASE,
+            )
+            or re.search(
+                r"\b(?:great|interesting|helpful|excellent|good answer|thanks?)\b",
+                prefix,
+                re.IGNORECASE,
+            )
+        ):
+            return False
+
+        grounding_parts = [str(participant_text or "")]
+        if 0 <= question_index < len(self._catalog):
+            for evidence_id in self._catalog[question_index]["evidence"]:
+                record = self._evidence_records.get(evidence_id) or {}
+                for source in record.get("sources") or []:
+                    grounding_parts.append(str(source.get("response_excerpt") or ""))
+                    grounding_parts.append(str(source.get("evidence_excerpt") or ""))
+        grounding = " ".join(grounding_parts).casefold()
+        content_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9']+", prefix.casefold())
+            if len(token) >= 4
+            and token not in _PROBE_GROUNDING_STOPWORDS
+            and token not in {"earlier", "mentioned", "described", "answer"}
+        }
+        return bool(content_tokens) and any(token in grounding for token in content_tokens)
 
     @staticmethod
     def _adaptive_probe_is_safe(text: str, participant_text: str) -> bool:
@@ -2337,6 +3386,17 @@ class EvidenceStateTracker:
             return str(self._questions[index].get("text") or "").strip()
         return ""
 
+    def _story_follow_up_is_safe(self, index: int, text: str, participant_text: str) -> bool:
+        return bool(
+            self._allow_story_follow_up and self._story_followups_accepted == 0
+            and self._pending_thread is None and self._thread_target_is_safe(index)
+            and len((participant_text or "").split()) >= 30
+            and classify_participant_turn(participant_text, self._language) == "answer"
+            and self._adaptive_probe_is_safe(text, participant_text)
+            and not any(self._resolutions.get(e) in {"declined", "unknown", "not_applicable"}
+                        for e in self._catalog[index]["evidence"])
+        )
+
     def _thread_target_is_safe(self, index: int) -> bool:
         """Keep opportunistic probes out of sensitive and closing material."""
         if not 0 <= index < len(self._questions):
@@ -2365,6 +3425,69 @@ class EvidenceStateTracker:
         # Bound diagnostic context for long-running panel interviews.
         if len(self._events) < 100:
             self._events.append(values)
+
+    @staticmethod
+    def _ai_use_from_warmup(answer: str) -> Optional[bool]:
+        """Use only an explicit self-report to choose a recent-example wording."""
+        value = " ".join(str(answer or "").lower().split())
+        if re.search(r"\bbut (?:i |we )?(?:do )?use\b", value):
+            return True
+        if re.search(
+            r"\b(?:i|we)\s+(?:(?:sometimes|often|regularly|occasionally)\s+)?"
+            r"(?:use|used|have used)\s+(?:ai|it|chatgpt|claude|gemini|copilot|chatbots?)\b",
+            value,
+        ):
+            return True
+        if re.search(
+            r"\b(?:don't|do not|never|haven't|have not)\s+"
+            r"(?:knowingly\s+)?(?:use|used)\b",
+            value,
+        ) or re.match(r"^(?:no\b|not knowingly\b)", value):
+            return False
+        return None
+
+    def _main_wording(self, index: int) -> str:
+        question = self._questions[index]
+        variants = question.get("main_wording_by_ai_use") or {}
+        key = (
+            "uses_ai" if self._reported_ai_use is True else
+            "no_ai_use" if self._reported_ai_use is False else None
+        )
+        return str(variants.get(key) or question.get("text") or "").strip()
+
+    def _ai_use_probe_wording(self, index: int, fallback: str = "") -> str:
+        variants = self._questions[index].get("probe_wording_by_ai_use") or {}
+        key = (
+            "uses_ai" if self._reported_ai_use is True else
+            "no_ai_use" if self._reported_ai_use is False else None
+        )
+        if key and (not fallback or fallback in variants.values()):
+            return str(variants.get(key) or fallback).strip()
+        return fallback
+
+    def _normalize_ai_use_wording(self, index: int, text: str) -> tuple[str, bool]:
+        variants = self._questions[index].get("main_wording_by_ai_use") or {}
+        if self._reported_ai_use is None or not variants:
+            return text, False
+        question_part = str(text or "").rsplit(".", 1)[-1].lower()
+        mismatched = (
+            self._reported_ai_use is True
+            and bool(re.search(r"\b(?:talked about|heard about|someone else)\b", question_part))
+        ) or (
+            self._reported_ai_use is False
+            and bool(re.search(r"\b(?:used?|using)\s+(?:ai|chatgpt|claude|gemini|copilot|it)\b", question_part))
+        )
+        if not mismatched:
+            return text, False
+        prefix = str(text or "").split(".", 1)[0].strip()
+        if not (prefix.endswith("?") or 3 <= len(prefix.split()) <= 18):
+            prefix = ""
+        elif not prefix.endswith("?"):
+            prefix += "."
+        else:
+            prefix = ""
+        replacement = self._main_wording(index)
+        return (f"{prefix} {replacement}".strip() if prefix else replacement), True
 
     def _high_confidence_resolution_hints(
         self, participant_text: str
@@ -2443,6 +3566,14 @@ class EvidenceStateTracker:
         self._clear_pending_thread(f"replacement:{reason}")
         next_index = self._next_unresolved(start)
         self._semantic_advances += 1
+        if next_index is not None and self._main_asked(next_index):
+            # A replacement may repair an already-asked partial card, but it
+            # must never replay that card's broad main wording. If the repair
+            # budget is exhausted, move to the next unresolved main card.
+            focused = self._focused_repair_replacement(next_index, reason)
+            if focused is not None:
+                return focused
+            next_index = self._next_unresolved(next_index + 1)
         if next_index is None:
             decision = TurnDecision(action="close", question=None, intent=None)
             self._record_event(action="replace", reason=reason, replacement="close")
@@ -2458,6 +3589,7 @@ class EvidenceStateTracker:
 
         intent = str(self._catalog[next_index]["main"])
         self._asked_intents.add(intent)
+        self._asked_main_indices.add(next_index)
         decision = TurnDecision(
             action="main",
             question=next_index + 1,
@@ -2469,7 +3601,7 @@ class EvidenceStateTracker:
             replacement_question=next_index + 1,
             replacement_intent=intent,
         )
-        visible = str(self._questions[next_index].get("text") or "").strip()
+        visible = self._main_wording(next_index)
         if next_index > start:
             visible = self._contextual_question_text(next_index, visible)
         return TurnReview(
@@ -2533,6 +3665,14 @@ class EvidenceStateTracker:
         """Spend repair-only's single clarification before allowing advance."""
         if not self._allow_coverage_clarifications or self._allow_follow_ups:
             return None
+        if self._answer_repairs_accepted >= self._max_quality_repairs:
+            self._answer_repairs_blocked += 1
+            self._record_event(
+                action="block_probe",
+                reason="study_quality_repair_limit_reached",
+                question=index + 1,
+            )
+            return None
         # A card is incomplete both when one goal is explicitly `partial` and
         # when one goal is covered while another is still wholly missing.
         # The latter is common when someone volunteers the product name but
@@ -2556,6 +3696,16 @@ class EvidenceStateTracker:
             # They still get one neutral, card-grounded quality-control repair
             # when the participant supplied only a partial answer.
             visible = self._fallback_coverage_repair_text(index)
+        continuity_text = self._continuity_bridge_text(index, visible, visible)
+        if continuity_text is not None:
+            visible = continuity_text
+            self._continuity_bridges_added += 1
+            self._continuity_bridged_questions.add(index)
+            self._record_event(
+                action="add_continuity_bridge",
+                question=index + 1,
+                intent=intent,
+            )
         self._asked_intents.add(intent)
         self._answer_repairs_accepted += 1
         self._record_event(
@@ -2582,6 +3732,31 @@ class EvidenceStateTracker:
         question = self._questions[index]
         main = str(question.get("text") or "").lower()
         catalog_evidence = self._catalog[index]["evidence"]
+        unresolved_ids = [evidence_id for evidence_id in catalog_evidence
+                          if self._resolutions.get(evidence_id) not in
+                          {"covered", "unknown", "declined", "not_applicable"}]
+        # Explicit researcher-authored mappings take priority over legacy
+        # domain-specific keyword templates. Keys are local criterion IDs e1…
+        authored = question.get("evidence_probes") or {}
+        for evidence_id in unresolved_ids:
+            mapped = str(authored.get(evidence_id.rsplit(":", 1)[-1]) or "").strip()
+            if mapped:
+                return self._ai_use_probe_wording(index, mapped) or mapped
+        # Backward-compatible matching for existing guides: use a listed
+        # probe only when it has distinctive vocabulary in common with a gap.
+        # Never match against covered goals or the broad main question.
+        def terms(value: str) -> set[str]:
+            return {word for word in re.findall(r"[a-z]+", value.lower())
+                    if len(word) > 3
+                    and word not in {"what", "which", "when", "where", "that", "this",
+                                     "have", "does", "your", "from", "with", "about", "personal",
+                                     "would", "could", "there", "their", "some", "other", "important"}}
+        gap_terms = set().union(*(terms(str(catalog_evidence[x])) for x in unresolved_ids))
+        ranked = [(len(terms(str(probe)) & gap_terms), str(probe).strip())
+                  for probe in question.get("probes") or [] if str(probe).strip()]
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if ranked and ranked[0][0] > 0 and (len(ranked) == 1 or ranked[0][0] > ranked[1][0]):
+            return ranked[0][1]
         unresolved_goals = [
             str(goal)
             for evidence_id, goal in catalog_evidence.items()
@@ -2602,11 +3777,10 @@ class EvidenceStateTracker:
             )
         if re.search(r"\b(?:product name|tool name|provider)\b", evidence):
             return "Which AI product or tool was it, if you know?"
-        if re.search(r"\b(?:context|constraint|requirement)\b", evidence):
-            return (
-                "Did you give it any important constraints or prior context? "
-                "Please describe only the type, not the contents."
-            )
+        if re.search(
+            r"\b(?:context|constraints?|requirements?)\b", evidence
+        ):
+            return "What important constraints or prior context, if any, did you give it?"
         if re.search(
             r"\b(?:input|instruction|prompt|source material|"
             r"context supplied|constraint supplied)\b",
@@ -2667,6 +3841,95 @@ class EvidenceStateTracker:
             index, reason
         ) or self._coverage_repair_replacement(index, reason)
 
+    def _answer_requirement_review(
+        self, index: int, participant_text: str
+    ) -> Optional[TurnReview]:
+        """Validate a focal episode before downstream questions inherit it.
+
+        This is deliberately a two-state gate, not a free-running adaptive
+        planner: accept a matching problem episode, or spend exactly one
+        neutral repair asking for a better-fitting example. The authored guide
+        decides whether a second miss ends the interview or merely continues.
+        """
+        if not 0 <= index < len(self._questions) or not self._main_asked(index):
+            return None
+        question = self._questions[index]
+        if question_answer_requirement(question) != "problem_episode":
+            return None
+        if index in self._requirements_satisfied:
+            return None
+        problem_evidence_covered = any(
+            self._resolutions.get(evidence_id) == "covered"
+            and re.search(
+                r"\b(?:problem|shortcoming|shortfall|failure|error|omission|"
+                r"limitation|could not be used)\b",
+                str(goal),
+                re.IGNORECASE,
+            )
+            for evidence_id, goal in self._catalog[index]["evidence"].items()
+        )
+        if answer_contains_problem_episode(participant_text) or problem_evidence_covered:
+            self._requirements_met += 1
+            self._requirements_satisfied.add(index)
+            if index in self._requirement_repairs:
+                self._record_event(
+                    action="accept",
+                    reason="answer_requirement_met_after_repair",
+                    question=index + 1,
+                )
+            return None
+
+        repair_intent = (
+            f"{self._catalog[index]['question_id']}:emergent:clarification"
+        )
+        if index not in self._requirement_repairs:
+            self._requirement_repairs.add(index)
+            self._asked_intents.add(repair_intent)
+            self._record_event(
+                action="replace",
+                reason="answer_requirement_repair",
+                question=index + 1,
+            )
+            return TurnReview(
+                text=(
+                    "It sounds like that task may have mostly worked. Was there "
+                    "something about the result that still fell short, or is "
+                    "there a different recent task that would be a better fit?"
+                ),
+                marker=None,
+                decision=TurnDecision(
+                    action="probe",
+                    question=index + 1,
+                    intent=repair_intent,
+                ),
+                replaced=True,
+                reason="answer_requirement_repair",
+                question_index=index,
+            )
+
+        self._requirements_missed += 1
+        self._record_event(
+            action="route",
+            reason="answer_requirement_not_met",
+            question=index + 1,
+        )
+        if question_requirement_miss_action(question) == "end_interview":
+            self._requirement_miss_closures += 1
+            return TurnReview(
+                text=(
+                    "It sounds like there may not be a recent example that fits "
+                    "this interview, and that’s completely fine. That completes "
+                    "the interview. Thank you for your time."
+                ),
+                marker=None,
+                decision=TurnDecision(action="close"),
+                replaced=True,
+                reason="answer_requirement_not_met",
+                question_index=len(self._questions),
+                closed=True,
+            )
+        return None
+
     def review(
         self,
         text: str,
@@ -2674,7 +3937,38 @@ class EvidenceStateTracker:
         decision: Optional[TurnDecision],
         current_index: int,
         participant_text: str = "",
+        participant_sequence: Optional[int] = None,
+        authoritative_evidence: bool = False,
     ) -> TurnReview:
+        if (
+            self._questions
+            and self._questions[0].get("id") == "everyday_use"
+            and self._main_asked(0)
+            and (len(self._questions) < 2 or not self._main_asked(1))
+            and participant_text
+        ):
+            reported_use = self._ai_use_from_warmup(participant_text)
+            if reported_use is not None:
+                self._reported_ai_use = reported_use
+        external_prepared = bool(
+            authoritative_evidence and self._external_judgment_pending
+        )
+        self._review_uses_authoritative_evidence = external_prepared
+        self._external_judgment_pending = False
+        if not external_prepared:
+            self._last_resolution_delta = {}
+            self._last_source_delta = {}
+            self._review_current_index = current_index
+            self._remember_participant_turn(participant_text, participant_sequence)
+        if external_prepared and decision is not None:
+            # The conversational model still owns action/intent/wording, but
+            # never gets to overrule the independent evidence judge.
+            decision = replace(
+                decision,
+                resolved={},
+                evidence_sources={},
+                not_applicable_question=None,
+            )
         conditional_skip = conditional_module_skip_index(
             self._questions, decision, current_index
         )
@@ -2682,7 +3976,14 @@ class EvidenceStateTracker:
             answered_index, skip_to = conditional_skip
             for index in range(answered_index, skip_to):
                 for evidence_id in self._catalog[index]["evidence"]:
+                    prior_status = self._resolutions.get(evidence_id)
                     self._resolutions[evidence_id] = "not_applicable"
+                    self._record_resolution_source(
+                        evidence_id,
+                        "not_applicable",
+                        decision,
+                        prior_status,
+                    )
             return self._replacement(skip_to, "module_not_applicable")
 
         if decision is None:
@@ -2692,6 +3993,13 @@ class EvidenceStateTracker:
             )
             if recovered_decision is not None:
                 decision = recovered_decision
+                if external_prepared:
+                    decision = replace(
+                        decision,
+                        resolved={},
+                        evidence_sources={},
+                        not_applicable_question=None,
+                    )
                 self._inline_decision_recoveries += 1
                 self._record_event(
                     action="recover",
@@ -2719,52 +4027,64 @@ class EvidenceStateTracker:
         self._pending_substantive_missing_decision = False
         self._missing_decision_participant_words = 0
 
-        current_evidence = (
-            set(self._catalog[current_index]["evidence"])
-            if 0 <= current_index < len(self._catalog)
-            else set()
-        )
-        valid_resolutions: dict[str, str] = {}
-        for evidence_id, status in decision.resolved.items():
-            if evidence_id not in self._valid_evidence:
-                continue
-            if status in {"covered", "partial"}:
-                valid_resolutions[evidence_id] = status
-                continue
-            # Terminal non-answer states are powerful: they stop probing. Do
-            # not trust them unless the participant explicitly used matching
-            # language while answering the current question.
-            pattern = _TERMINAL_STATUS_PATTERNS.get(status)
-            if (
-                evidence_id in current_evidence
-                and pattern is not None
-                and pattern.search(participant_text or "")
-            ):
-                valid_resolutions[evidence_id] = status
-            else:
-                self._terminal_resolutions_rejected += 1
-        invalid_resolution_ids = {
-            evidence_id
-            for evidence_id in decision.resolved
-            if evidence_id not in self._valid_evidence
-        }
-        if invalid_resolution_ids:
-            self._invalid_decisions += 1
-            self._invalid_resolution_ids.update(invalid_resolution_ids)
-        for evidence_id, status in valid_resolutions.items():
-            # Never let a later, weaker self-report downgrade resolved state.
-            if status == "partial" and self._resolutions.get(evidence_id) in {
-                "covered",
-                "unknown",
-                "declined",
-                "not_applicable",
-            }:
-                continue
-            self._resolutions[evidence_id] = status
+        valid_resolutions: dict[str, str] = dict(self._last_resolution_delta)
+        if not external_prepared:
+            current_evidence = (
+                set(self._catalog[current_index]["evidence"])
+                if 0 <= current_index < len(self._catalog)
+                else set()
+            )
+            valid_resolutions = {}
+            for evidence_id, status in decision.resolved.items():
+                if evidence_id not in self._valid_evidence:
+                    continue
+                if status in {"covered", "partial"}:
+                    valid_resolutions[evidence_id] = status
+                    continue
+                # Terminal non-answer states are powerful: they stop probing.
+                # Do not trust them unless the participant explicitly used
+                # matching language while answering the current question.
+                pattern = _TERMINAL_STATUS_PATTERNS.get(status)
+                if (
+                    evidence_id in current_evidence
+                    and pattern is not None
+                    and pattern.search(participant_text or "")
+                ):
+                    valid_resolutions[evidence_id] = status
+                else:
+                    self._terminal_resolutions_rejected += 1
+            invalid_resolution_ids = {
+                evidence_id
+                for evidence_id in decision.resolved
+                if evidence_id not in self._valid_evidence
+            }
+            if invalid_resolution_ids:
+                self._invalid_decisions += 1
+                self._invalid_resolution_ids.update(invalid_resolution_ids)
+            for evidence_id, status in valid_resolutions.items():
+                # Never let a later, weaker self-report downgrade resolved state.
+                prior_status = self._resolutions.get(evidence_id)
+                if status == "partial" and prior_status in {
+                    "covered",
+                    "unknown",
+                    "declined",
+                    "not_applicable",
+                }:
+                    continue
+                self._resolutions[evidence_id] = status
+                self._record_resolution_source(
+                    evidence_id, status, decision, prior_status
+                )
         if decision.focal_entity:
             self._latest_focal_entity = decision.focal_entity
         if decision.provenance:
             self._latest_provenance = decision.provenance
+
+        requirement_review = self._answer_requirement_review(
+            current_index, participant_text
+        )
+        if requirement_review is not None:
+            return requirement_review
 
         if decision.action == "close":
             current_main_asked = (
@@ -2916,12 +4236,40 @@ class EvidenceStateTracker:
                 self._probe_policy_corrections += 1
                 self._answer_repairs_blocked += 1
                 return self._replacement(question_index, "coverage_repair_not_allowed")
+            if self._answer_repairs_accepted >= self._max_quality_repairs:
+                self._answer_repairs_blocked += 1
+                return self._replacement(
+                    question_index + 1, "study_quality_repair_limit_reached"
+                )
             if intent in self._asked_intents:
                 self._answer_repairs_blocked += 1
                 return self._replacement(
                     question_index + 1, "coverage_repair_limit_reached"
                 )
             self._answer_repairs_accepted += 1
+
+        if decision.action == "main" and self._semantic_main_already_asked(question_index):
+            self._semantic_duplicate_mains_blocked += 1
+            return self._replacement(
+                question_index + 1, "semantic_duplicate_main"
+            )
+
+        # A protected main card must be heard before any of its probes. A
+        # partial answer volunteered during the preceding warm-up can make a
+        # missing-evidence clarification look useful, but accepting it here
+        # produces a confusing question before the card's actual anchor.
+        if (
+            decision.action == "probe"
+            and self._question_protected(question_index)
+            and not self._main_asked(question_index)
+        ):
+            self._order_corrections += 1
+            self._record_event(
+                action="block_probe",
+                reason="protected_main_before_probe",
+                question=question_index + 1,
+            )
+            return self._replacement(question_index, "protected_main_before_probe")
 
         policy_replaced = False
         policy_reason: Optional[str] = None
@@ -2944,6 +4292,7 @@ class EvidenceStateTracker:
                     question=decision.question,
                     intent=decision.intent,
                     resolved=decision.resolved,
+                    evidence_sources=decision.evidence_sources,
                     focal_entity=decision.focal_entity,
                     provenance=decision.provenance,
                 )
@@ -3016,6 +4365,8 @@ class EvidenceStateTracker:
             )
             target_evidence = set(self._catalog[question_index]["evidence"])
             grounded_target_evidence = target_evidence.intersection(valid_resolutions)
+            story_follow_up = (intent in self._catalog[question_index]["probes"]
+                               and self._story_follow_up_is_safe(question_index, text, participant_text))
             target_main_intent = str(self._catalog[question_index]["main"])
             non_closing_indexes = [
                 index
@@ -3057,7 +4408,7 @@ class EvidenceStateTracker:
                 block_reason = "thread_duplicate_intent"
             elif not grounded_target_evidence:
                 block_reason = "thread_without_target_evidence"
-            elif self._question_resolved(question_index) and not resolved_depth_check:
+            elif self._question_resolved(question_index) and not (resolved_depth_check or story_follow_up):
                 block_reason = "thread_target_resolved"
 
             if block_reason is not None:
@@ -3075,6 +4426,8 @@ class EvidenceStateTracker:
             self._threaded_from.add(current_index)
             self._pending_thread = (current_index, question_index)
             self._threaded_probes_accepted += 1
+            if story_follow_up:
+                self._story_followups_accepted += 1
             if resolved_depth_check:
                 self._depth_threads_accepted += 1
             self._record_event(
@@ -3264,6 +4617,17 @@ class EvidenceStateTracker:
             return self._replacement(question_index + 1, "question_resolved")
 
         self._asked_intents.add(intent)
+        if decision.action == "main":
+            self._asked_main_indices.add(question_index)
+            text, adapted = self._normalize_ai_use_wording(question_index, text)
+            if adapted:
+                policy_replaced = True
+                policy_reason = "ai_use_main_wording"
+                self._record_event(
+                    action="normalize_main_wording",
+                    question=question_index + 1,
+                    reported_ai_use=self._reported_ai_use,
+                )
         self._clear_pending_thread(
             "returned_to_anchor"
             if decision.action == "probe" and question_index == current_index
@@ -3297,6 +4661,13 @@ class EvidenceStateTracker:
             "inline_decision_recoveries": self._inline_decision_recoveries,
             "turn_decisions_invalid": self._invalid_decisions,
             "invalid_resolution_ids": sorted(self._invalid_resolution_ids),
+            "invalid_evidence_source_excerpts": (
+                self._invalid_evidence_source_excerpts
+            ),
+            "evidence_judge_calls": self._evidence_judge_calls,
+            "evidence_judge_failures": self._evidence_judge_failures,
+            "evidence_judgments_accepted": self._evidence_judgments_accepted,
+            "evidence_judgments_rejected": self._evidence_judgments_rejected,
             "terminal_resolutions_rejected": self._terminal_resolutions_rejected,
             "duplicate_intents_blocked": self._duplicate_intents_blocked,
             "resolved_probes_blocked": self._resolved_probes_blocked,
@@ -3307,6 +4678,7 @@ class EvidenceStateTracker:
             "depth_threads_accepted": self._depth_threads_accepted,
             "threading_blocked": self._threading_blocked,
             "thread_resumes": self._thread_resumes,
+            "story_followups_accepted": self._story_followups_accepted,
             "thread_pending": self._pending_thread is not None,
             "focused_advances_accepted": self._focused_advances_accepted,
             "probe_policy_corrections": self._probe_policy_corrections,
@@ -3314,9 +4686,21 @@ class EvidenceStateTracker:
             "adaptive_probe_wording_accepted": (
                 self._adaptive_probe_wording_accepted
             ),
+            "acknowledged_probe_wording_accepted": (
+                self._acknowledged_probe_wording_accepted
+            ),
+            "continuity_bridges_added": self._continuity_bridges_added,
             "emergent_probes_blocked": self._emergent_probes_blocked,
             "answer_repairs_accepted": self._answer_repairs_accepted,
             "answer_repairs_blocked": self._answer_repairs_blocked,
+            "quality_repair_limit": self._max_quality_repairs,
+            "answer_requirements_met": self._requirements_met,
+            "answer_requirements_missed": self._requirements_missed,
+            "answer_requirement_repairs": len(self._requirement_repairs),
+            "answer_requirement_miss_closures": self._requirement_miss_closures,
+            "semantic_duplicate_mains_blocked": (
+                self._semantic_duplicate_mains_blocked
+            ),
             "clarification_misclassifications_blocked": (
                 self._clarification_misclassifications_blocked
             ),
@@ -3388,6 +4772,7 @@ class InterviewGuideProcessor(FrameProcessor):
             self._questions,
             self._closing,
             probe_selection=self._guide.get("probe_selection", "ordered"),
+            allow_story_follow_up=bool(self._guide.get("allow_story_follow_up")),
             allow_emergent_follow_ups=bool(
                 self._orchestration["allow_emergent_follow_ups"]
             ),
@@ -3399,6 +4784,7 @@ class InterviewGuideProcessor(FrameProcessor):
             allow_threading=bool(self._orchestration["allow_threading"]),
             language=self._language,
             orchestration_profile=str(self._orchestration["profile"]),
+            max_quality_repairs=int(self._guide.get("max_quality_repairs", 3)),
         )
         # Bot turns that happen *before* the participant has spoken (the
         # spoken welcome message in particular) used to be counted against
@@ -3488,6 +4874,7 @@ class InterviewGuideProcessor(FrameProcessor):
         marker: Optional[int],
         decision: Optional[TurnDecision],
         participant_text: str = "",
+        participant_sequence: Optional[int] = None,
     ) -> TurnReview:
         """Validate semantic turn state before modular voice reaches TTS."""
         if not participant_text:
@@ -3528,8 +4915,12 @@ class InterviewGuideProcessor(FrameProcessor):
                     decision,
                     self.current_question_index,
                     participant_text,
+                    participant_sequence,
                 )
                 if conditional_review.reason == "module_not_applicable":
+                    conditional_review = self._evidence.attach_evidence_delta(
+                        conditional_review
+                    )
                     if conditional_review.closed:
                         self._closed = True
                     elif conditional_review.question_index is not None:
@@ -3583,8 +4974,14 @@ class InterviewGuideProcessor(FrameProcessor):
                 question_index=index,
             )
         review = self._evidence.review(
-            text, marker, decision, self.current_question_index, participant_text
+            text,
+            marker,
+            decision,
+            self.current_question_index,
+            participant_text,
+            participant_sequence,
         )
+        review = self._evidence.attach_evidence_delta(review)
         if (
             participant_kind in {"clarification", "procedural"}
             and review.decision is not None
@@ -3628,6 +5025,7 @@ class InterviewGuideProcessor(FrameProcessor):
                 self._questions,
                 self._closing,
                 probe_selection=self._guide.get("probe_selection", "ordered"),
+                allow_story_follow_up=bool(self._guide.get("allow_story_follow_up")),
                 allow_emergent_follow_ups=bool(
                     self._orchestration["allow_emergent_follow_ups"]
                 ),
@@ -3778,6 +5176,9 @@ class InterviewGuideProcessor(FrameProcessor):
             **self._evidence.stats(),
         }
 
+    def evidence_ledger(self) -> dict[str, object]:
+        return self._evidence.evidence_ledger()
+
 
 # ── Stateful controller (text chat) ─────────────────────────────────────────
 
@@ -3819,10 +5220,13 @@ class TextStructuredController:
         self._max_index_reached = 0
         self._question_indices_asked: set[int] = set()
         self._time_constrained = False
+        self._delivered_questions: dict[int, set[str]] = {}
+        self._duplicate_wording_blocks = 0
         self._evidence = EvidenceStateTracker(
             self._questions,
             self._closing,
             probe_selection=guide.get("probe_selection", "ordered"),
+            allow_story_follow_up=bool(guide.get("allow_story_follow_up")),
             allow_emergent_follow_ups=bool(
                 self._orchestration["allow_emergent_follow_ups"]
             ),
@@ -3834,6 +5238,7 @@ class TextStructuredController:
             allow_threading=bool(self._orchestration["allow_threading"]),
             language=self._language,
             orchestration_profile=str(self._orchestration["profile"]),
+            max_quality_repairs=int(guide.get("max_quality_repairs", 3)),
         )
         self._last_question_text = (
             str(self._questions[0].get("text") or "").strip()
@@ -3863,6 +5268,55 @@ class TextStructuredController:
     @property
     def closing_message(self) -> str:
         return str(self._closing or DEFAULT_CLOSING).strip()
+
+    @property
+    def needs_evidence_judge(self) -> bool:
+        return self._evidence.needs_evidence_judge
+
+    def evidence_judge_context(self, participant_text: str = "") -> dict[str, object]:
+        return self._evidence.evidence_judge_context(
+            self.current_question_index, participant_text
+        )
+
+    def prepare_external_judgment(
+        self,
+        participant_text: str,
+        participant_sequence: Optional[int],
+        *,
+        resolutions: dict[str, str],
+        evidence_sources: dict[str, str],
+        missing_facets: dict[str, list[str]],
+        confidences: dict[str, float],
+        judge_model: str,
+        failed: bool = False,
+    ) -> dict[str, object]:
+        return self._evidence.prepare_external_judgment(
+            participant_text=participant_text,
+            participant_sequence=participant_sequence,
+            current_index=self.current_question_index,
+            resolutions=resolutions,
+            evidence_sources=evidence_sources,
+            missing_facets=missing_facets,
+            confidences=confidences,
+            judge_model=judge_model,
+            failed=failed,
+        )
+
+    def authoritative_model_note(self) -> str:
+        return self._evidence.authoritative_model_note(self.current_question_index)
+
+    @staticmethod
+    def _question_wording_key(text: str) -> str:
+        """Ignore an acknowledgment prefix, punctuation and polite wrappers.
+
+        This is deliberately not a general semantic-equivalence classifier.
+        Keys are scoped to the card so two product contexts may ask the same
+        question without one suppressing the other.
+        """
+        question = str(text or "").split("?", 1)[0]
+        question = re.split(r"[.!]\s+", question)[-1].casefold()
+        question = re.sub(r"^(?:please\s+)?(?:can|could|would) you\s+(?:please\s+)?", "", question)
+        return " ".join(re.findall(r"\w+", question))
 
     def begin_time_limited_final_question(self) -> tuple[str, int] | None:
         """Select one remaining card for a clearly signposted final turn.
@@ -3989,6 +5443,8 @@ class TextStructuredController:
         marker: Optional[int],
         decision: Optional[TurnDecision],
         participant_text: str = "",
+        participant_sequence: Optional[int] = None,
+        authoritative_evidence: bool = False,
     ) -> TurnReview:
         """Validate the model's proposed turn and replace semantic repeats."""
         if not self._allow_follow_ups and not self._skip_answered_questions:
@@ -3999,8 +5455,12 @@ class TextStructuredController:
                     decision,
                     self.current_question_index,
                     participant_text,
+                    participant_sequence,
                 )
                 if conditional_review.reason == "module_not_applicable":
+                    conditional_review = self._evidence.attach_evidence_delta(
+                        conditional_review
+                    )
                     if conditional_review.closed:
                         self._closed = True
                         self.current_question_index = len(self._questions)
@@ -4095,11 +5555,8 @@ class TextStructuredController:
                 )
             )
             if clarification_escaped:
-                resume = self._evidence.clarification_resume_text(anchor)
-                reviewed_text = (
-                    resume
-                    if resume
-                    else "Could you say a little more about what was unclear?"
+                reviewed_text = clarification_pause_response(reviewed_text) or (
+                    "I haven't answered your clarification yet. Could you say which part you'd like me to explain?"
                 )
                 replaced = True
                 reason = "clarification_advance_blocked"
@@ -4111,9 +5568,8 @@ class TextStructuredController:
                         reason = "clarification_paused"
                     reviewed_text = paused
                 else:
-                    resume = self._evidence.clarification_resume_text(anchor)
-                    reviewed_text = resume or (
-                        "Could you say a little more about what was unclear?"
+                    reviewed_text = (
+                        "I haven't answered your clarification yet. Could you say which part you'd like me to explain?"
                     )
                     replaced = True
                     reason = "clarification_answer_missing"
@@ -4127,8 +5583,49 @@ class TextStructuredController:
             )
         else:
             review = self._evidence.review(
-                text, marker, decision, self.current_question_index, participant_text
+                text,
+                marker,
+                decision,
+                self.current_question_index,
+                participant_text,
+                participant_sequence,
+                authoritative_evidence=authoritative_evidence,
             )
+            review = self._evidence.attach_evidence_delta(review)
+        if not (review.text or "").strip() and not review.closed:
+            # Recover both visible text and navigation metadata. Merely adding
+            # a question string leaves its intent unrecorded and can repeat it.
+            reason = "empty_visible_turn_repaired"
+            if participant_kind in {"procedural", "flow_repair", "clarification", "continuation"}:
+                review = replace(review, text="Could you say a little more about what you need before we continue?",
+                                 replaced=True, reason=reason)
+            else:
+                review = self._evidence._replacement(self.current_question_index, reason)
+                review = self._evidence.attach_evidence_delta(review)
+        if (not review.closed and review.question_index is not None
+                and review.decision is not None and review.decision.action in {"main", "probe"}
+                and participant_kind == "answer" and not _EVIDENCE_REVISION_RE.search(participant_text or "")):
+            index = review.question_index
+            seen = self._delivered_questions.get(index, set())
+            if "?" in review.text and self._question_wording_key(review.text) in seen:
+                self._duplicate_wording_blocks += 1
+                # Try an unasked authored probe tied to another unresolved
+                # criterion; otherwise move on without manufacturing coverage.
+                alternatives = self._questions[index].get("evidence_probes") or {}
+                remaining = next((q["remaining_evidence_ids"] for q in self.evidence_ledger()["questions"]
+                                  if q["question_number"] == index + 1), [])
+                candidate = next((str(alternatives[e.rsplit(":", 1)[-1]]) for e in remaining
+                                  if e.rsplit(":", 1)[-1] in alternatives
+                                  and self._question_wording_key(str(alternatives[e.rsplit(":", 1)[-1]])) not in seen), None)
+                if candidate:
+                    catalog = self._evidence._catalog[index]
+                    intent = next(p for p, wording in catalog["probes"].items() if wording == candidate)
+                    self._evidence._asked_intents.add(intent)
+                    review = replace(review, text=candidate, decision=TurnDecision("probe", index + 1, intent),
+                                     replaced=True, reason="duplicate_wording_alternative")
+                else:
+                    review = self._evidence._replacement(index + 1, "duplicate_wording_advance")
+                review = self._evidence.attach_evidence_delta(review)
         if review.closed:
             self._closed = True
             self.current_question_index = len(self._questions)
@@ -4137,6 +5634,9 @@ class TextStructuredController:
             self._question_indices_asked.add(review.question_index)
             self.sync_to_marker(review.question_index + 1)
         visible = (review.text or "").strip()
+        if (review.question_index is not None and review.decision is not None
+                and review.decision.action in {"main", "probe", "thread"} and "?" in visible):
+            self._delivered_questions.setdefault(review.question_index, set()).add(self._question_wording_key(visible))
         if review.decision is None or review.decision.action in {
             "main",
             "probe",
@@ -4185,6 +5685,7 @@ class TextStructuredController:
         ]
         return {
             "channel": "text",
+            "duplicate_wording_blocks": self._duplicate_wording_blocks,
             "total_questions": self.total_questions,
             "questions_reached": reached,
             "completed": self._closed,
@@ -4195,6 +5696,9 @@ class TextStructuredController:
             "counted_bot_turns": self._counted_bot_turns,
             **self._evidence.stats(),
         }
+
+    def evidence_ledger(self) -> dict[str, object]:
+        return self._evidence.evidence_ledger()
 
     def snapshot(self) -> dict:
         return {
@@ -4219,6 +5723,9 @@ __all__ = [
     "participant_interruption_response",
     "procedural_resume_response",
     "parse_turn_decision",
+    "questions_semantically_duplicate",
+    "interview_guide_quality_warnings",
+    "answer_contains_problem_episode",
     "question_intents",
     "strip_control_markers",
     "strip_progress_marker",

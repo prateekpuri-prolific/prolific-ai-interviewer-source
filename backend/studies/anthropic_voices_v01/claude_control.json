@@ -1,0 +1,442 @@
+{
+  "arm_id": "claude_control",
+  "target": 20,
+  "eligibility": "ai_chatbots includes Claude; screener records recency and frequency of use.",
+  "study": {
+    "title": "Voices missing from AI research — Claude users (comparison arm)",
+    "description": "Anthropic Institute outreach pilot; draft, not approved for fielding.",
+    "status": "draft",
+    "research_spec": {
+      "version": "anthropic-voices-v0.17",
+      "stage": "pilot",
+      "method": "exploration",
+      "decision_to_inform": "Show what groups underrepresented in a Claude-user sample add to Anthropic's account of what people want from AI, what they have experienced, and what concerns them.",
+      "research_questions": [
+        "How do desired outcomes, actual experiences, and value-based concerns compare across these recruited groups?",
+        "Which views or experiences are missing from a Claude-user-only sample?"
+      ],
+      "population": {
+        "participant_role": "Claude users (comparison arm)",
+        "subject": "Experiences, hopes, worries, and expectations concerning AI",
+        "knowledge_relationship": "Participants report their own experiences and views; secondhand accounts remain labeled as such.",
+        "inclusion_notes": "ai_chatbots includes Claude; screener records recency and frequency of use.",
+        "knowledge_limits": [
+          "Accounts are self-reported.",
+          "This opt-in, quota-matched sample is not a probability sample of the public."
+        ],
+        "terminology_notes": "",
+        "accessibility_notes": "",
+        "sensitivity_notes": "Do not solicit diagnoses or other identifiable health information. Accept skip, uncertainty, and refusal without further probing."
+      },
+      "targets": [
+        {
+          "id": "recent_encounter",
+          "name": "Shared core: recent encounter",
+          "description": "The specific task in the participant's last AI use, or the subject of their last AI-related conversation or secondhand account; distinguish firsthand from secondhand. A time word alone, such as 'today', is not enough. Accept an explicit inability to recall an example.",
+          "evidence_needed": [
+            "The specific task in the participant's last AI use, or the subject of their last AI-related conversation or secondhand account; distinguish firsthand from secondhand. A time word alone, such as 'today', is not enough. Accept an explicit inability to recall an example."
+          ],
+          "do_not_infer": [
+            "Prevalence or causal effect from an individual account."
+          ],
+          "required": true
+        },
+        {
+          "id": "vision",
+          "name": "Shared core: vision",
+          "description": "The participant's desired AI outcome, including no desired outcome or uncertainty. A clear hope is adequate coverage; its personal meaning may still be worth exploring. No technical pathway or explanation of an obvious benefit is required.",
+          "evidence_needed": [
+            "The participant's desired AI outcome, including no desired outcome or uncertainty. A clear hope is adequate coverage; its personal meaning may still be worth exploring. No technical pathway or explanation of an obvious benefit is required."
+          ],
+          "do_not_infer": [
+            "Prevalence or causal effect from an individual account."
+          ],
+          "required": true
+        },
+        {
+          "id": "vision_progress",
+          "name": "Shared core: vision progress",
+          "description": "The participant's impression of progress toward their hoped-for outcome from what they have seen or heard, including uncertainty or no progress. A bare yes permits one request for the example; no technical expertise is expected.",
+          "evidence_needed": [
+            "The participant's impression of progress toward their hoped-for outcome from what they have seen or heard, including uncertainty or no progress. A bare yes permits one request for the example; no technical expertise is expected."
+          ],
+          "do_not_infer": [
+            "Prevalence or causal effect from an individual account."
+          ],
+          "required": true
+        },
+        {
+          "id": "values_conflict",
+          "name": "Shared core: values conflict",
+          "description": "A participant-defined concern plus one piece of context about what prompted it, or explicit no concern or uncertainty. A bare risk label such as 'it could lead to bioweapons' identifies the risk but leaves its source unexplored; do not ask why obvious harm is bad.",
+          "evidence_needed": [
+            "A participant-defined concern plus one piece of context about what prompted it, or explicit no concern or uncertainty. A bare risk label such as 'it could lead to bioweapons' identifies the risk but leaves its source unexplored; do not ask why obvious harm is bad."
+          ],
+          "do_not_infer": [
+            "Prevalence or causal effect from an individual account."
+          ],
+          "required": true
+        },
+        {
+          "id": "company_trust",
+          "name": "Shared core: company trust",
+          "description": "At least one specific action the participant wants AI companies to take, or an explicit lack of expectation. A broad adjective such as 'careful' names a direction but does not yet describe an action.",
+          "evidence_needed": [
+            "At least one specific action the participant wants AI companies to take, or an explicit lack of expectation. A broad adjective such as 'careful' names a direction but does not yet describe an action."
+          ],
+          "do_not_infer": [
+            "Prevalence or causal effect from an individual account."
+          ],
+          "required": true
+        }
+      ],
+      "clarification_policy": {
+        "participant_definition": "",
+        "in_scope": [],
+        "out_of_scope": [],
+        "ambiguous_cases": [],
+        "ambiguity_handling": "If it is unclear whether an experience fits, invite the participant to describe the relevant feature or interaction briefly and treat it as ambiguous rather than forcing a classification."
+      },
+      "interviewer_stance": {
+        "organization_label": "Prolific research pilot",
+        "disclosure": "An AI interviewer asks questions and limited follow-ups for this Prolific research pilot.",
+        "boundaries": [
+          "Ask one neutral question at a time.",
+          "Never persuade someone to use AI.",
+          "Do not give medical, employment, or legal advice."
+        ]
+      },
+      "participant_information": {
+        "purpose_summary": "Explore experiences and views of AI across different groups of adults in the US and UK.",
+        "participation_summary": "A roughly 15-minute typed interview with an AI interviewer about experiences, hopes, concerns, and expectations of AI. You may skip any question.",
+        "estimated_minutes": 15,
+        "ai_disclosure": "An AI interviewer will read your typed answers and may ask a short follow-up question. It does not give advice or make decisions about you.",
+        "data_handling_summary": "Your typed answers are processed by the AI interviewer and privacy checks, and a pseudonymised transcript is saved for this research. The checks may miss sensitive details, so please avoid identifiers. This text-only pilot does not collect audio or video. Project staff may review transcripts for research and privacy quality assurance.",
+        "data_controller": "Prolific Academic Ltd, 483 Green Lanes, London N13 4BS, United Kingdom.",
+        "data_recipients_summary": "Authorised Prolific project staff and the AI service providers configured for this deployment process the interview. Only non-identifying aggregate findings may be shared externally with a limited number of prospective research partners; participant quotations, excerpts and transcripts are not shared externally in this pilot.",
+        "risks_summary": "Questions about AI, work, healthcare or trust may feel uncomfortable. You may skip questions or stop. The interviewer does not give medical or other professional advice.",
+        "benefits_summary": "There is no expected direct benefit to you.",
+        "compensation_summary": "Payment is shown in the Prolific study listing. Stopping or skipping a question will not affect your standing on Prolific; the study's payment policy applies.",
+        "privacy_reminder": "Please avoid names, diagnoses, treatment details, exact locations, and anything that identifies you or another person.",
+        "rights": [
+          "You may skip any question.",
+          "You may stop the interview at any time.",
+          "You may say you are unsure.",
+          "You may request access to or deletion of linked source data using the contact route in the full notice."
+        ],
+        "consent_required": true,
+        "consent_label": "I have read the study information and agree to take part in this typed AI interview. I understand that I may skip questions or stop.",
+        "researcher_identity": "Prolific Academic Ltd research team",
+        "researcher_contact": "",
+        "complaints_contact": "",
+        "ethics_review_reference": "",
+        "data_retention_period": "",
+        "withdrawal_instructions": "",
+        "privacy_notice_url": ""
+      },
+      "fielding": {
+        "recruitment_source": "prolific",
+        "response_limit": 20,
+        "soft_launch_limit": 5,
+        "participant_id_parameter": "PROLIFIC_PID",
+        "require_profile": false,
+        "completion_url": "",
+        "no_consent_url": "",
+        "inactivity_url": ""
+      },
+      "analysis_notes": "Arm=claude_control; protocol=anthropic-voices-v0.17; target=20. A shared rapport warm-up precedes five shared core cards in the same order and with the same evidence goals in every arm. The recent-experience card selects use or non-use wording from the participant's warm-up answer; record firsthand versus secondhand accounts. Record vision, evidence of progress, value-based concerns, and company expectations separately. Screen for recency/frequency, primary chatbot and non-use reasons in Prolific. Keep countries and arms separate; code with Anthropic's published categories plus new/other, without treating this small opt-in sample as prevalence or a causal test. Closed Pew-worded survey questions are a separate instrument pending wording verification."
+    }
+  },
+  "agent": {
+    "name": "AI views interviewer — claude_control",
+    "modality": "text",
+    "avatar": "neutral",
+    "system_prompt": "You are a neutral AI interviewer for a Prolific research pilot about AI experiences, hopes, concerns and company expectations across groups. Start with the shared day-to-day-use warm-up, accepting a brief answer without probing. Explore one recent experience or exposure before moving to broader hopes, perceived progress, concerns and expectations. Then cover the demographic module and participant-led close. Use the same research constructs and depth policy for every group. Listen for what an answer means and what remains worth understanding. A concrete episode can merit a question about motivation or experience even when its task is clear. Stop when enough is understood or the participant has reached a limit. Probes are examples, not a script. No technical mechanism is required for a hope. Ask about progress only from what the person knows or has noticed; accept uncertainty. If no hope was named, ask whether any AI developments have mattered to them without assuming they have a goal. Use neutral conceptual bridges and the participant's vocabulary. Keep the broad hopes question open to every area of life. Do not lead, praise, debate, ask why obvious harm is bad, or request diagnoses or identifying health details. Distinguish use from hearsay. Let people skip, be uncertain, correct themselves or stop. Keep the interview within about 15 minutes.",
+    "welcome_message": "Hi, and thanks for taking part. I'm an AI interviewer for this Prolific study. We'll spend about 15 minutes talking about your experiences and views of AI. There's no need for any specialist knowledge, and there are no right or wrong answers. You can skip any question or say you're not sure. Please avoid sharing names or personal health details. Ready to get started?",
+    "pipeline_type": "modular",
+    "llm_model": "openai/gpt-5.6-luna",
+    "stt_provider": "",
+    "tts_provider": "",
+    "turn_detection": "local",
+    "language": "en",
+    "max_duration_seconds": 900,
+    "status": "draft",
+    "participant_id_mode": "external",
+    "widget_primary_color": "#111827",
+    "widget_listening_message": "Agent is listening…",
+    "widget_show_progress": false,
+    "interview_mode": "structured",
+    "interview_guide": {
+      "questions": [
+        {
+          "text": "To start, do you use AI in your day-to-day life, and if so, what do you use it for?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [],
+          "max_follow_ups": 0,
+          "id": "everyday_use",
+          "module": "Warm-up",
+          "purpose": "An easy opening that establishes the participant's own day-to-day use or non-use of AI.",
+          "target_ids": [],
+          "evidence_goal": [],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant uses AI, uses a chatbot specifically, or has a positive or negative view."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "optional",
+          "sensitivity": "standard",
+          "phase": "warm_up",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": true,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Can you tell me about the last time you used AI and what you were doing?",
+          "main_wording_by_ai_use": {
+            "uses_ai": "Can you tell me about the last time you used AI and what you were doing?",
+            "no_ai_use": "What's the most recent thing you heard or talked about concerning AI?"
+          },
+          "probe_wording_by_ai_use": {
+            "uses_ai": "What were you using it for that time?",
+            "no_ai_use": "What did you hear or talk about?"
+          },
+          "probes": [
+            "What were you using it for that time?",
+            "What did you hear or talk about?"
+          ],
+          "max_follow_ups": 3,
+          "id": "recent_encounter",
+          "module": "Shared core",
+          "purpose": "The specific task in the participant's last AI use, or the subject of their last AI-related conversation or secondhand account; distinguish firsthand from secondhand. A time word alone, such as 'today', is not enough. Accept an explicit inability to recall an example.",
+          "target_ids": [
+            "recent_encounter"
+          ],
+          "evidence_goal": [
+            "The specific task in the participant's last AI use, or the subject of their last AI-related conversation or secondhand account; distinguish firsthand from secondhand. A time word alone, such as 'today', is not enough. Accept an explicit inability to recall an example."
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [
+            "Why the participant chose AI or what prompted their exposure",
+            "What the experience was like and what they got from it"
+          ],
+          "do_not_assume": [
+            "The participant has used AI recently, holds a definite opinion, or can name a desired outcome.",
+            "A secondhand account is a firsthand experience."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Looking ahead, if you could wave a magic wand, what would you most want AI to make possible for you or people you care about, if anything?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What would you most want to change?",
+            "What does that mean for you?"
+          ],
+          "max_follow_ups": 3,
+          "id": "vision",
+          "module": "Shared core",
+          "purpose": "The participant's desired AI outcome, including no desired outcome or uncertainty. A clear hope is adequate coverage; its personal meaning may still be worth exploring. No technical pathway or explanation of an obvious benefit is required.",
+          "target_ids": [
+            "vision"
+          ],
+          "evidence_goal": [
+            "The participant's desired AI outcome, including no desired outcome or uncertainty. A clear hope is adequate coverage; its personal meaning may still be worth exploring. No technical pathway or explanation of an obvious benefit is required."
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [
+            "The meaning of the participant's hoped-for change",
+            "What would become possible for them or people they have in mind"
+          ],
+          "do_not_assume": [
+            "The participant has used AI recently, holds a definite opinion, or can name a desired outcome.",
+            "A secondhand account is a firsthand experience."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Have you seen or heard anything that makes that hope feel closer yet?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What did you see or hear?"
+          ],
+          "max_follow_ups": 1,
+          "id": "vision_progress",
+          "module": "Shared core",
+          "purpose": "The participant's impression of progress toward their hoped-for outcome from what they have seen or heard, including uncertainty or no progress. A bare yes permits one request for the example; no technical expertise is expected.",
+          "target_ids": [
+            "vision_progress"
+          ],
+          "evidence_goal": [
+            "The participant's impression of progress toward their hoped-for outcome from what they have seen or heard, including uncertainty or no progress. A bare yes permits one request for the example; no technical expertise is expected."
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [
+            "Something they have already seen or heard; accept uncertainty"
+          ],
+          "do_not_assume": [
+            "The participant has used AI recently, holds a definite opinion, or can name a desired outcome.",
+            "A secondhand account is a firsthand experience."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "So far we've talked about what AI might make possible. Are there ways it could be developed or used that would go against what matters to you?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What brought that concern to mind for you?"
+          ],
+          "max_follow_ups": 2,
+          "id": "values_conflict",
+          "module": "Shared core",
+          "purpose": "A participant-defined concern plus one piece of context about what prompted it, or explicit no concern or uncertainty. A bare risk label such as 'it could lead to bioweapons' identifies the risk but leaves its source unexplored; do not ask why obvious harm is bad.",
+          "target_ids": [
+            "values_conflict"
+          ],
+          "evidence_goal": [
+            "A participant-defined concern plus one piece of context about what prompted it, or explicit no concern or uncertainty. A bare risk label such as 'it could lead to bioweapons' identifies the risk but leaves its source unexplored; do not ask why obvious harm is bad."
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [
+            "What prompted the concern, if not already given",
+            "A boundary or tradeoff they themselves raised"
+          ],
+          "do_not_assume": [
+            "The participant has used AI recently, holds a definite opinion, or can name a desired outcome.",
+            "A secondhand account is a firsthand experience."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Thinking about the companies developing AI, what would you want them to do, if anything, to earn or keep your trust?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What would that look like in practice?"
+          ],
+          "max_follow_ups": 2,
+          "id": "company_trust",
+          "module": "Shared core",
+          "purpose": "At least one specific action the participant wants AI companies to take, or an explicit lack of expectation. A broad adjective such as 'careful' names a direction but does not yet describe an action.",
+          "target_ids": [
+            "company_trust"
+          ],
+          "evidence_goal": [
+            "At least one specific action the participant wants AI companies to take, or an explicit lack of expectation. A broad adjective such as 'careful' names a direction but does not yet describe an action."
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [
+            "A concrete company action",
+            "How they would recognize that action"
+          ],
+          "do_not_assume": [
+            "The participant has used AI recently, holds a definite opinion, or can name a desired outcome.",
+            "A secondhand account is a firsthand experience."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Looking ahead, is there a hope or worry about AI that we have not yet discussed?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [],
+          "max_follow_ups": 0,
+          "id": "close",
+          "module": "Close",
+          "purpose": "An additional participant-defined hope, worry, or explicit absence of one.",
+          "target_ids": [],
+          "evidence_goal": [
+            "An additional participant-defined hope, worry, or explicit absence of one."
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant has a further hope or worry."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "closing",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": true,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        }
+      ],
+      "conversation_policy": "contextual_v1",
+      "conversation_follow_up_budget": 10,
+      "orchestration_profile": "exploratory",
+      "closing_message": "Thank you. This completes the interview. Please use the return button to go back to Prolific.",
+      "allow_follow_ups": true,
+      "skip_answered_questions": true,
+      "probe_selection": "relevance",
+      "allow_emergent_follow_ups": true,
+      "allow_story_follow_up": false,
+      "max_quality_repairs": 3
+    },
+    "store_audio": false,
+    "track_engagement": false,
+    "adaptive_enabled": false
+  }
+}

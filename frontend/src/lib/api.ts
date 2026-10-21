@@ -198,7 +198,10 @@ export interface InterviewQuestionConfig {
   purpose?: string | null;
   target_ids?: string[];
   evidence_goal?: string[];
+  exploration_focus?: string[];
   do_not_assume?: string[];
+  answer_requirement?: "any" | "problem_episode";
+  requirement_miss_action?: "continue" | "end_interview";
   priority?: "required" | "optional";
   sensitivity?: "standard" | "elevated";
   phase?: "warm_up" | "core" | "closing";
@@ -211,6 +214,8 @@ export interface InterviewQuestionConfig {
 }
 
 export interface InterviewGuideConfig {
+  conversation_policy?: "contextual_v1" | null;
+  conversation_follow_up_budget?: number;
   questions: InterviewQuestionConfig[];
   orchestration_profile?: "fixed" | "repair_only" | "semi_structured" | "exploratory" | null;
   closing_message: string | null;
@@ -218,6 +223,15 @@ export interface InterviewGuideConfig {
   skip_answered_questions?: boolean | null;
   probe_selection?: "ordered" | "relevance";
   allow_emergent_follow_ups?: boolean;
+  max_quality_repairs?: number;
+}
+
+export interface ParticipantExperienceFeedback {
+  token: string;
+  naturalness_rating: number;
+  repeated_questions: boolean;
+  technical_issues: boolean;
+  comments?: string | null;
 }
 
 export interface Agent {
@@ -498,6 +512,8 @@ export interface SessionItem {
   research_protocol_version?: string | null;
   research_stage?: string | null;
   completion_metadata?: Record<string, unknown> | null;
+  post_interview_feedback?: Record<string, unknown> | null;
+  post_interview_feedback_submitted_at?: string | null;
   participant_consent_confirmed?: boolean;
   participant_consent_at?: string | null;
   ended_at: string | null;
@@ -786,6 +802,15 @@ export const templates = {
 export const widget = {
   config: (widgetKey: string) =>
     request<WidgetConfig>(`/widget/${widgetKey}`),
+  submitFeedback: (
+    widgetKey: string,
+    sessionId: string,
+    feedback: ParticipantExperienceFeedback,
+  ) =>
+    request<{ submitted: boolean; already_submitted: boolean }>(
+      `/widget/${widgetKey}/sessions/${sessionId}/feedback`,
+      { method: "POST", body: JSON.stringify(feedback) },
+    ),
 };
 
 // ── Participant Identifiers ──────────────────────────────────

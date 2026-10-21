@@ -178,10 +178,13 @@ class S3AudioStorage(AudioStorageBackend):
                 objects = page.get("Contents") or []
                 if not objects:
                     continue
-                client.delete_objects(
+                result = client.delete_objects(
                     Bucket=self._bucket,
                     Delete={"Objects": [{"Key": o["Key"]} for o in objects]},
                 )
+                if result.get("Errors"):
+                    # S3 may return HTTP 200 with per-object deletion failures.
+                    raise RuntimeError("audio_object_deletion_failed")
 
         await asyncio.to_thread(_delete)
 

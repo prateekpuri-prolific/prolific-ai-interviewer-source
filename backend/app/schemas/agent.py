@@ -17,6 +17,14 @@ from app.models.agent import AgentModality, AgentStatus, InterviewMode, Particip
 class InterviewQuestion(BaseModel):
     """A single question in the structured interview guide."""
     text: str = Field(..., min_length=1, description="The main question text")
+    main_wording_by_ai_use: dict[Literal["uses_ai", "no_ai_use"], str] = Field(
+        default_factory=dict,
+        description="Optional main wording chosen from the participant's warm-up AI-use answer.",
+    )
+    probe_wording_by_ai_use: dict[Literal["uses_ai", "no_ai_use"], str] = Field(
+        default_factory=dict,
+        description="Optional listed probe wording chosen from the participant's warm-up AI-use answer.",
+    )
     probes: list[str] = Field(
         default_factory=list,
         description="Example follow-up probes for deeper exploration",
@@ -36,7 +44,29 @@ class InterviewQuestion(BaseModel):
     purpose: str | None = Field(None, max_length=1500)
     target_ids: list[str] = Field(default_factory=list, max_length=20)
     evidence_goal: list[str] = Field(default_factory=list, max_length=20)
+    evidence_probes: dict[str, str] = Field(
+        default_factory=dict,
+        description="Researcher-authored fallback per evidence criterion, keyed e1, e2, etc."
+    )
+    exploration_focus: list[str] = Field(
+        default_factory=list, max_length=8,
+        description="Optional research-relevant directions to explore; never a required checklist.",
+    )
     do_not_assume: list[str] = Field(default_factory=list, max_length=20)
+    answer_requirement: Literal["any", "problem_episode"] = Field(
+        "any",
+        description=(
+            "Optional server-enforced validity gate for a focal episode. "
+            "A problem episode receives one neutral repair before routing."
+        ),
+    )
+    requirement_miss_action: Literal["continue", "end_interview"] = Field(
+        "continue",
+        description=(
+            "What to do when the participant still has no qualifying episode "
+            "after the bounded repair."
+        ),
+    )
     priority: Literal["required", "optional"] = "required"
     sensitivity: Literal["standard", "elevated"] = "standard"
     phase: Literal["warm_up", "core", "closing"] = Field(
@@ -82,6 +112,18 @@ class InterviewQuestion(BaseModel):
     )
 
 
+    @model_validator(mode="after")
+    def validate_evidence_probes(self):
+        valid = {f"e{i}" for i in range(1, len(self.evidence_goal) + 1)}
+        if any(key not in valid or not text.strip() or text not in self.probes
+               for key, text in self.evidence_probes.items()):
+            raise ValueError("evidence_probes must map existing e1/e2/... criteria to a listed nonempty probe")
+        if any(not text.strip() or text not in self.probes
+               for text in self.probe_wording_by_ai_use.values()):
+            raise ValueError("probe_wording_by_ai_use must use listed nonempty probes")
+        return self
+
+
 class InterviewGuide(BaseModel):
     """Structured interview protocol — a list of questions with probes."""
     questions: list[InterviewQuestion] = Field(
@@ -89,6 +131,8 @@ class InterviewGuide(BaseModel):
         min_length=1,
         description="Ordered list of interview questions",
     )
+    conversation_policy: Literal["contextual_v1"] | None = None
+    conversation_follow_up_budget: int = Field(10, ge=0, le=30)
     orchestration_profile: Literal[
         "fixed", "repair_only", "semi_structured", "exploratory"
     ] | None = Field(
@@ -135,9 +179,28 @@ class InterviewGuide(BaseModel):
             "not address an evidence gap. The max_follow_ups cap still applies."
         ),
     )
+    allow_story_follow_up: bool = Field(
+        False,
+        description="Permit one grounded story follow-up per interview using bounded threading; no extra time or follow-up budget.",
+    )
+    max_quality_repairs: int = Field(
+        3,
+        ge=0,
+        le=20,
+        description=(
+            "Study-wide ceiling for narrow missing-evidence repairs in the "
+            "repair_only profile."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_protocol_structure(self) -> "InterviewGuide":
+        if self.conversation_policy and self.orchestration_profile != "exploratory":
+            raise ValueError("contextual_v1 requires the exploratory profile")
+        if self.conversation_policy and any(not question.id for question in self.questions):
+            raise ValueError("contextual_v1 requires stable topic IDs")
+        if self.conversation_policy and any(question.answer_requirement != "any" for question in self.questions):
+            raise ValueError("contextual_v1 does not support problem-episode screening")
         ids = [question.id for question in self.questions if question.id]
         duplicates = sorted({question_id for question_id in ids if ids.count(question_id) > 1})
         # Legacy persisted guides may contain duplicate IDs. They remain
@@ -347,6 +410,9 @@ class AgentCreate(BaseModel):
     def _text_requires_modular(self) -> "AgentCreate":
         if self.modality == AgentModality.TEXT and self.pipeline_type != PipelineType.MODULAR:
             raise ValueError("Text agents must use the modular pipeline.")
+        if self.interview_guide and self.interview_guide.conversation_policy:
+            if self.modality != AgentModality.TEXT or self.interview_mode != InterviewMode.STRUCTURED:
+                raise ValueError("contextual_v1 requires a structured text agent")
         return self
 
 

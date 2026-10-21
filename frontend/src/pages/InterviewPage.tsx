@@ -19,6 +19,7 @@ import { widget, type WidgetConfig } from "../lib/api";
 import { hexToRgba, hexToRgb } from "../lib/colors";
 import { MicCapture, AudioPlayer, SpeechEndpointDetector } from "../lib/audio";
 import { encodeAudioFrame, decodeFrame } from "../lib/pipecat-proto";
+import { OrderedAudio } from "../lib/orderedAudio";
 
 type Status = "loading" | "idle" | "input" | "connecting" | "active" | "ended" | "error";
 type EndedReason = "natural" | "user_stopped" | "inactive";
@@ -26,6 +27,7 @@ type ResponseMode = "voice" | "text";
 type RecordingState = "idle" | "recording" | "confirming" | "transcribing";
 type RecordingRecovery = "no_speech" | null;
 type MicCheckStatus = "idle" | "checking" | "ready" | "quiet" | "denied" | "unavailable";
+type FeedbackStatus = "idle" | "submitting" | "submitted" | "skipped" | "error";
 
 interface ChatMessage {
   id: string;
@@ -135,6 +137,7 @@ export default function InterviewPage() {
   const [config, setConfig] = useState<WidgetConfig | null>(null);
   const [participantId, setParticipantId] = useState(pidFromUrl || "");
   const [consentAccepted, setConsentAccepted] = useState(false);
+  const [privacyNotice, setPrivacyNotice] = useState<string | null>(null);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [userSpeaking, setUserSpeaking] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -155,6 +158,13 @@ export default function InterviewPage() {
   const [inactivityWarning, setInactivityWarning] = useState(false);
   const [inactivitySecondsRemaining, setInactivitySecondsRemaining] = useState(60);
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
+  const [feedbackSession, setFeedbackSession] = useState<{ sessionId: string; token: string } | null>(null);
+  const [naturalnessRating, setNaturalnessRating] = useState<number | null>(null);
+  const [repeatedQuestions, setRepeatedQuestions] = useState<boolean | null>(null);
+  const [technicalIssues, setTechnicalIssues] = useState<boolean | null>(null);
+  const [feedbackComments, setFeedbackComments] = useState("");
+  const [feedbackStatus, setFeedbackStatus] = useState<FeedbackStatus>("idle");
+  const [feedbackError, setFeedbackError] = useState("");
   const [micCheckStatus, setMicCheckStatus] = useState<MicCheckStatus>("idle");
   const [micCheckMessage, setMicCheckMessage] = useState("");
 
@@ -181,6 +191,7 @@ export default function InterviewPage() {
   const promptAudioRef = useRef<HTMLAudioElement | null>(null);
   const promptAudioUrlRef = useRef<string | null>(null);
   const promptAudioAbortRef = useRef<AbortController | null>(null);
+  const orderedAudioRef = useRef(new OrderedAudio());
   const audioEnabledRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -200,6 +211,7 @@ export default function InterviewPage() {
   const finishAfterCurrentAnswerRef = useRef(false);
   const finishingInterviewRef = useRef(false);
   const returnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const feedbackTouchedRef = useRef(false);
   const micCheckStreamRef = useRef<MediaStream | null>(null);
   const micCheckContextRef = useRef<AudioContext | null>(null);
   const micCheckFrameRef = useRef<number | null>(null);
@@ -311,6 +323,7 @@ export default function InterviewPage() {
   }, [chatMessages, agentTyping]);
 
   const stopPromptAudio = useCallback(() => {
+    orderedAudioRef.current.reset();
     promptAudioAbortRef.current?.abort();
     promptAudioAbortRef.current = null;
     if (promptAudioRef.current) {
@@ -325,9 +338,10 @@ export default function InterviewPage() {
     setAudioLoading(false);
   }, []);
 
-  const playPromptAudio = useCallback(async (text: string, force = false) => {
+  const playPromptAudio = useCallback(async (text: string, force = false, privacyWarning = false) => {
     if (!widgetKey || !config?.audio_available || (!audioEnabledRef.current && !force) || !text.trim()) return;
-    stopPromptAudio();
+    try {
+    await orderedAudioRef.current.enqueue(async () => {
     setAudioError("");
     setAudioLoading(true);
     const controller = new AbortController();
@@ -346,29 +360,30 @@ export default function InterviewPage() {
       promptAudioUrlRef.current = url;
       const audio = new Audio(url);
       promptAudioRef.current = audio;
-      audio.onended = () => {
-        if (promptAudioUrlRef.current === url) {
-          URL.revokeObjectURL(url);
-          promptAudioUrlRef.current = null;
-          promptAudioRef.current = null;
-        }
-        if (responseModeRef.current === "voice") {
-          void startRecordingRef.current?.();
-        }
-      };
-      await audio.play();
+      await new Promise<void>((resolve, reject) => {
+        audio.onended = () => resolve();
+        audio.onerror = () => reject(new Error("Playback failed"));
+        controller.signal.addEventListener("abort", () => reject(new DOMException("Stopped", "AbortError")), { once: true });
+        void audio.play().catch(reject);
+      });
+    } finally {
+      if (promptAudioAbortRef.current === controller) {
+        promptAudioAbortRef.current = null;
+        if (promptAudioUrlRef.current) URL.revokeObjectURL(promptAudioUrlRef.current);
+        promptAudioUrlRef.current = null;
+        promptAudioRef.current = null;
+        setAudioLoading(false);
+      }
+    }
+    }, privacyWarning ? undefined : () => {
+      if (responseModeRef.current === "voice") void startRecordingRef.current?.();
+    });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
-        setAudioError("Audio is temporarily unavailable. You can continue in text.");
-        if (responseModeRef.current === "voice") {
-          void startRecordingRef.current?.();
-        }
+        setAudioError("Audio stopped. Please read the privacy notice and question, then continue in text or turn audio off and on to retry.");
       }
-    } finally {
-      if (promptAudioAbortRef.current === controller) promptAudioAbortRef.current = null;
-      setAudioLoading(false);
     }
-  }, [config?.audio_available, stopPromptAudio, widgetKey]);
+  }, [config?.audio_available, widgetKey]);
 
   const cleanupTurnRecording = useCallback(() => {
     if (endpointFrameRef.current != null) {
@@ -421,6 +436,29 @@ export default function InterviewPage() {
       inactivityCountdownRef.current = null;
     }
   }, [releaseTurnMicrophone, stopPromptAudio]);
+
+  const cancelAutomaticReturn = useCallback(() => {
+    feedbackTouchedRef.current = true;
+    if (returnTimerRef.current) {
+      clearTimeout(returnTimerRef.current);
+      returnTimerRef.current = null;
+    }
+  }, []);
+
+  const resetFeedback = useCallback(() => {
+    feedbackTouchedRef.current = false;
+    setFeedbackSession(null);
+    setNaturalnessRating(null);
+    setRepeatedQuestions(null);
+    setTechnicalIssues(null);
+    setFeedbackComments("");
+    setFeedbackStatus("idle");
+    setFeedbackError("");
+    if (returnTimerRef.current) {
+      clearTimeout(returnTimerRef.current);
+      returnTimerRef.current = null;
+    }
+  }, []);
 
   const clearInactivityWarning = useCallback(() => {
     setInactivityWarning(false);
@@ -573,6 +611,7 @@ export default function InterviewPage() {
     setErrorMsg("");
     setElapsed(0);
     setReturnUrl(null);
+    resetFeedback();
     setEndedReason("natural");
     setProgress(null);
     setInactivityWarning(false);
@@ -665,6 +704,8 @@ export default function InterviewPage() {
             } else if (json.type === "transcript") {
               if (json.role === "agent") setVoicePrompt(json.content || "");
               if (json.role === "user") setVoiceUserText(json.content || "");
+            } else if (json.type === "privacy_warning") {
+              setVoicePrompt(json.text || "");
             }
           } catch {
             /* ignore */
@@ -720,7 +761,7 @@ export default function InterviewPage() {
         err instanceof Error ? err.message : "Failed to start interview"
       );
     }
-  }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, handleAudioLevel, cleanupConnection, micCheckStatus]);
+  }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, handleAudioLevel, cleanupConnection, micCheckStatus, resetFeedback]);
 
   // ── 2b. Start text chat ─────────────────────────────────────
   const handleStartChat = useCallback(async () => {
@@ -730,6 +771,7 @@ export default function InterviewPage() {
     setErrorMsg("");
     setElapsed(0);
     setReturnUrl(null);
+    resetFeedback();
     setEndedReason("natural");
     setProgress(null);
     setInactivityWarning(false);
@@ -835,6 +877,12 @@ export default function InterviewPage() {
             case "progress":
               setProgress({ current: msg.current, total: msg.total });
               break;
+            case "privacy_warning":
+              setPrivacyNotice(msg.text);
+              if (audioEnabledRef.current && config?.audio_available) {
+                void playPromptAudio(msg.text, false, true);
+              }
+              break;
             case "inactivity_warning":
               showInactivityWarning(Number(msg.seconds_remaining) || 60);
               break;
@@ -857,6 +905,9 @@ export default function InterviewPage() {
               setAgentTyping(false);
               break;
             case "finalized": {
+              if (typeof msg.session_id === "string" && typeof msg.feedback_token === "string") {
+                setFeedbackSession({ sessionId: msg.session_id, token: msg.feedback_token });
+              }
               const incomplete = [
                 "participant_finished",
                 "participant_inactive",
@@ -871,7 +922,11 @@ export default function InterviewPage() {
               if (target) {
                 setReturnUrl(target);
                 if (returnTimerRef.current) clearTimeout(returnTimerRef.current);
-                returnTimerRef.current = setTimeout(() => window.location.assign(target), 1400);
+                // Give participants a real chance to answer the optional UX
+                // survey. Any interaction cancels this fallback redirect.
+                returnTimerRef.current = setTimeout(() => {
+                  if (!feedbackTouchedRef.current) window.location.assign(target);
+                }, 45_000);
               }
               break;
             }
@@ -914,13 +969,14 @@ export default function InterviewPage() {
       setStatus("error");
       setErrorMsg(err instanceof Error ? err.message : "Failed to start");
     }
-  }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, cleanupConnection, playPromptAudio, releaseTurnMicrophone, showInactivityWarning, clearInactivityWarning, micCheckStatus, recordExperienceEvent]);
+  }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, cleanupConnection, playPromptAudio, releaseTurnMicrophone, showInactivityWarning, clearInactivityWarning, micCheckStatus, recordExperienceEvent, resetFeedback]);
 
   const sendParticipantText = useCallback((value: string, finishInterview = false) => {
     const text = value.trim();
     if ((!text && !finishInterview) || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
 
     if (text) {
+      setPrivacyNotice(null);
       setChatMessages((prev) => [
         ...prev,
         { id: crypto.randomUUID(), role: "user", text, timestamp: new Date() },
@@ -1248,6 +1304,47 @@ export default function InterviewPage() {
     }
   };
 
+  const handleSubmitFeedback = async (event: React.FormEvent) => {
+    event.preventDefault();
+    cancelAutomaticReturn();
+    if (
+      !widgetKey ||
+      !feedbackSession ||
+      naturalnessRating === null ||
+      repeatedQuestions === null ||
+      technicalIssues === null
+    ) return;
+    setFeedbackStatus("submitting");
+    setFeedbackError("");
+    try {
+      await widget.submitFeedback(widgetKey, feedbackSession.sessionId, {
+        token: feedbackSession.token,
+        naturalness_rating: naturalnessRating,
+        repeated_questions: repeatedQuestions,
+        technical_issues: technicalIssues,
+        comments: feedbackComments.trim() || null,
+      });
+      setFeedbackStatus("submitted");
+      if (returnUrl) {
+        returnTimerRef.current = setTimeout(
+          () => window.location.assign(returnUrl),
+          900,
+        );
+      }
+    } catch (error) {
+      setFeedbackStatus("error");
+      setFeedbackError(
+        error instanceof Error ? error.message : "Feedback could not be saved.",
+      );
+    }
+  };
+
+  const handleSkipFeedback = () => {
+    cancelAutomaticReturn();
+    setFeedbackStatus("skipped");
+    if (returnUrl) window.location.assign(returnUrl);
+  };
+
   // ── Format elapsed time ─────────────────────────────────────
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60);
@@ -1316,10 +1413,92 @@ export default function InterviewPage() {
                   ? "Your responses so far have been saved. You may close this page."
                   : "Thank you for your participation!"}
               </p>
-              {returnUrl && <div className="mt-5"><p className="mb-3 text-xs text-gray-500">Returning you to Prolific…</p><a href={returnUrl} className="inline-flex rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white">Return to Prolific now</a></div>}
+              {returnUrl && !feedbackSession && <div className="mt-5"><p className="mb-3 text-xs text-gray-500">Returning you to Prolific…</p><a href={returnUrl} className="inline-flex rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white">Return to Prolific now</a></div>}
             </div>
           )}
         </div>}
+
+        {status === "ended" && feedbackSession && feedbackStatus !== "submitted" && feedbackStatus !== "skipped" && (
+          <form
+            onSubmit={handleSubmitFeedback}
+            onFocus={cancelAutomaticReturn}
+            className="mb-8 w-full rounded-2xl border border-gray-200 bg-white p-6 text-left shadow-sm animate-slide-up"
+            aria-labelledby="participant-feedback-heading"
+          >
+            <div className="mb-5">
+              <h2 id="participant-feedback-heading" className="text-lg font-semibold text-gray-900">
+                One-minute interview check
+              </h2>
+              <p className="mt-1 text-sm leading-relaxed text-gray-500">
+                Optional. This is stored separately from your interview answers and helps us improve the interviewer.
+              </p>
+            </div>
+
+            <fieldset>
+              <legend className="text-sm font-medium text-gray-800">
+                How natural did the conversation feel?
+              </legend>
+              <div className="mt-2 grid grid-cols-5 gap-2" aria-label="Naturalness rating from 1 to 5">
+                {[1, 2, 3, 4, 5].map((rating) => (
+                  <button
+                    key={rating}
+                    type="button"
+                    aria-pressed={naturalnessRating === rating}
+                    onClick={() => { cancelAutomaticReturn(); setNaturalnessRating(rating); }}
+                    className={`rounded-xl border px-2 py-2.5 text-sm font-semibold transition-colors ${naturalnessRating === rating ? "border-gray-900 bg-gray-900 text-white" : "border-gray-200 text-gray-600 hover:bg-gray-50"}`}
+                  >
+                    {rating}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-1 flex justify-between text-[11px] text-gray-400"><span>Not natural</span><span>Very natural</span></div>
+            </fieldset>
+
+            <fieldset className="mt-5">
+              <legend className="text-sm font-medium text-gray-800">
+                Did the interviewer ask for something you had already answered?
+              </legend>
+              <div className="mt-2 flex gap-2">
+                {[{ label: "No", value: false }, { label: "Yes", value: true }].map((option) => (
+                  <button key={option.label} type="button" aria-pressed={repeatedQuestions === option.value} onClick={() => { cancelAutomaticReturn(); setRepeatedQuestions(option.value); }} className={`rounded-xl border px-4 py-2 text-sm font-medium ${repeatedQuestions === option.value ? "border-gray-900 bg-gray-900 text-white" : "border-gray-200 text-gray-600 hover:bg-gray-50"}`}>{option.label}</button>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="mt-5">
+              <legend className="text-sm font-medium text-gray-800">
+                Did you have any microphone, transcription, or connection problems?
+              </legend>
+              <div className="mt-2 flex gap-2">
+                {[{ label: "No", value: false }, { label: "Yes", value: true }].map((option) => (
+                  <button key={option.label} type="button" aria-pressed={technicalIssues === option.value} onClick={() => { cancelAutomaticReturn(); setTechnicalIssues(option.value); }} className={`rounded-xl border px-4 py-2 text-sm font-medium ${technicalIssues === option.value ? "border-gray-900 bg-gray-900 text-white" : "border-gray-200 text-gray-600 hover:bg-gray-50"}`}>{option.label}</button>
+                ))}
+              </div>
+            </fieldset>
+
+            <label className="mt-5 block text-sm font-medium text-gray-800" htmlFor="participant-feedback-comments">
+              Anything awkward or frustrating? <span className="font-normal text-gray-400">Optional</span>
+            </label>
+            <textarea id="participant-feedback-comments" value={feedbackComments} maxLength={1000} rows={3} onChange={(event) => { cancelAutomaticReturn(); setFeedbackComments(event.target.value); }} className="mt-2 w-full resize-y rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-800 outline-none focus:border-gray-500" placeholder="A question, interaction, or technical issue…" />
+
+            {feedbackError && <p role="alert" className="mt-3 text-sm text-red-600">{feedbackError}</p>}
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <button type="submit" disabled={naturalnessRating === null || repeatedQuestions === null || technicalIssues === null || feedbackStatus === "submitting"} className="rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">
+                {feedbackStatus === "submitting" ? "Saving…" : "Submit feedback"}
+              </button>
+              <button type="button" onClick={handleSkipFeedback} className="px-2 py-2 text-sm font-medium text-gray-500 hover:text-gray-800">
+                Skip
+              </button>
+              {returnUrl && <a href={returnUrl} onClick={cancelAutomaticReturn} className="ml-auto text-sm font-medium text-gray-600 underline">Return to Prolific</a>}
+            </div>
+          </form>
+        )}
+
+        {status === "ended" && feedbackStatus === "submitted" && (
+          <div role="status" className="mb-8 w-full rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center text-sm font-medium text-emerald-800">
+            Feedback saved. {returnUrl ? "Returning you to Prolific…" : "Thank you."}
+          </div>
+        )}
 
         {/* ── Structured progress bar ────────────────────────── */}
         {participantInfo && (status === "idle" || status === "input") && (
@@ -1465,6 +1644,14 @@ export default function InterviewPage() {
               </div>
             )}
 
+            {privacyNotice && (
+              <aside role="alert" className="shrink-0 border-b border-amber-300 bg-amber-50 px-5 py-4 sm:px-7">
+                <div className="mx-auto max-w-3xl">
+                  <p className="text-sm font-semibold text-amber-950">Privacy notice</p>
+                  <p className="mt-1 text-sm leading-relaxed text-amber-950">{privacyNotice}</p>
+                </div>
+              </aside>
+            )}
             <main id="chat-scroll" className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-3xl px-5 pb-48 pt-10 sm:px-8 sm:pb-52 sm:pt-14">
                 {status === "connecting" && chatMessages.length === 0 && (
@@ -1820,7 +2007,7 @@ export default function InterviewPage() {
             </button>
           )}
 
-          {status === "ended" && (
+          {status === "ended" && (!feedbackSession || feedbackStatus === "submitted" || feedbackStatus === "skipped") && (
             <p className="text-gray-400 text-sm animate-fade-in">
               You may close this page now.
             </p>

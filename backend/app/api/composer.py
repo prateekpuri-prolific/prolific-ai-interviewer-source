@@ -17,6 +17,7 @@ from app.api.text_chat import _get_key, _openai_api_base
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.study import Study
+from app.pipeline.interview_guide import interview_guide_quality_warnings
 from app.schemas.agent import InterviewGuide, InterviewQuestion
 from app.schemas.study import ResearchSpec
 
@@ -239,6 +240,12 @@ Design requirements:
   not have to decide which parts of their life or role to summarize.
 - Start the core with a concrete experience question. Move from broad experience to
   specific incidents, meaning, unmet needs, and a short closing reflection.
+- When the rest of a guide truly requires a qualifying problem episode, mark
+  that anchor answer_requirement=problem_episode. Use
+  requirement_miss_action=end_interview only when downstream questions would
+  otherwise inherit a false premise and no useful alternate module remains.
+  The runtime will ask one neutral fit repair; do not duplicate that repair as
+  a separate guide card.
 - Each main question needs a purpose, evidence goal, things not to assume, and
   1-3 short probes. Probes must be optional routes, not a mandatory checklist.
 - Make evidence goals atomic enough to drive a real follow-up decision. For a
@@ -525,6 +532,12 @@ def _normalize_question_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         selection = str(guide.get("probe_selection") or "").strip().lower()
         if selection not in {"ordered", "relevance"}:
             guide["probe_selection"] = "relevance"
+
+        warnings = payload.setdefault("warnings", [])
+        if isinstance(warnings, list):
+            for warning in interview_guide_quality_warnings(guide):
+                if warning not in warnings and len(warnings) < 20:
+                    warnings.append(warning)
 
     audit = payload.get("audit")
     if isinstance(audit, dict):

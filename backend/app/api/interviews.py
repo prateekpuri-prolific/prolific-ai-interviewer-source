@@ -15,6 +15,7 @@ The endpoint:
 import asyncio
 import secrets
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -28,6 +29,7 @@ from app.models.session import Session, SessionStatus, aggregate_session_tokens
 from app.models.study import Study
 from app.audio.storage import recording_enabled_for_agent
 from app.providers.validate import validate_agent_pipeline_config
+from app.privacy import queue_privacy_warning_audio, redact_session_data
 from app.realtime import publish_transcript_event
 from app.session_manager import register_session, unregister_session
 from app.research.protocol import build_protocol_snapshot, consent_required
@@ -271,7 +273,7 @@ async def interview_ws(
 
     logger.info(
         f"Interview started: session={session_id}, agent={agent_cfg['id']}, "
-        f"widget_key={widget_key}, participant_id={participant_id}"
+        "participant metadata omitted"
     )
 
     # Register session in Redis for tracking
@@ -284,17 +286,23 @@ async def interview_ws(
     # ── 4. Build & run the Pipecat pipeline ────────────────────────
     final_status = SessionStatus.COMPLETED
     audio_manager = None
+    privacy_redaction_counts: Counter[str] = Counter()
     try:
         from pipecat.pipeline.runner import PipelineRunner
         from app.pipeline.runner import build_pipeline
 
+        pipeline_task = None
+
         # Notify callback → publishes to Redis for live monitoring
         async def _notify(payload: dict):
+            if payload.get("type") == "privacy_warning":
+                privacy_redaction_counts.update(payload.get("categories") or {})
+                await queue_privacy_warning_audio(pipeline_task, payload)
             await publish_transcript_event(str(session_id), payload)
             # Participant-facing voice UI is text-first: mirror completed
             # transcript turns over the same socket that already carries
             # progress events, while audio continues as binary frames.
-            if payload.get("type") == "transcript":
+            if payload.get("type") in {"transcript", "privacy_warning"}:
                 try:
                     await websocket.send_json(payload)
                 except Exception:
@@ -332,6 +340,7 @@ async def interview_ws(
             research_spec=agent_cfg["research_spec"],
             participant_context=participant_context,
         )
+        pipeline_task = task
 
         runner = PipelineRunner(handle_sigint=False, handle_sigterm=False)
 
@@ -352,7 +361,7 @@ async def interview_ws(
     except asyncio.CancelledError:
         logger.info(f"Interview {session_id}: task cancelled")
     except Exception as exc:
-        logger.exception(f"Interview {session_id}: pipeline error — {exc}")
+        logger.error(f"Interview {session_id}: pipeline error — {type(exc).__name__}")
         final_status = SessionStatus.ERROR
     finally:
         # ── 5. Finalise session ────────────────────────────────────
@@ -372,6 +381,12 @@ async def interview_ws(
                         sess.audio_recording_status = await audio_manager.finalize_session()
                     elif sess.audio_recording_enabled:
                         sess.audio_recording_status = "failed"
+                    await redact_session_data(
+                        db,
+                        session_id,
+                        session=sess,
+                        ingress_counts=privacy_redaction_counts,
+                    )
                     await db.commit()
 
             # Broadcast session_ended event so live monitors close cleanly
@@ -393,5 +408,5 @@ async def interview_ws(
 
         except Exception as cleanup_exc:
             logger.error(
-                f"Interview {session_id}: failed to finalise session — {cleanup_exc}"
+                f"Interview {session_id}: failed to finalise session — {type(cleanup_exc).__name__}"
             )

@@ -287,3 +287,20 @@ class TestAgentsCRUD:
 
         resp = await client.get(f"/api/studies/{other_id}/agents/{agent_id}")
         assert resp.status_code == 404
+
+
+async def test_contextual_policy_stays_text_only_on_partial_agent_update(client, study_id):
+    import json
+    from pathlib import Path
+    payload = json.loads((Path(__file__).parents[1] / 'studies/anthropic_voices_v01/claude_control.json').read_text())['agent']
+    created = await client.post(f'/api/studies/{study_id}/agents', json=payload)
+    assert created.status_code == 201
+    aid = created.json()['id']
+    updated = await client.patch(f'/api/studies/{study_id}/agents/{aid}', json={'modality': 'voice'})
+    assert updated.status_code == 422
+    assert 'structured text' in updated.json()['detail']
+    updated = await client.patch(f'/api/studies/{study_id}/agents/{aid}', json={'interview_mode': 'free_form'})
+    assert updated.status_code == 422
+    payload['modality'] = 'voice'
+    rejected = await client.post(f'/api/studies/{study_id}/agents', json=payload)
+    assert rejected.status_code == 422

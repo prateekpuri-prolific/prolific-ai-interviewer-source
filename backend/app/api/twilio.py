@@ -22,6 +22,7 @@ import asyncio
 import json
 import secrets
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
@@ -34,6 +35,7 @@ from app.models.agent import Agent, AgentStatus, ParticipantIdMode
 from app.models.session import Session, SessionStatus, aggregate_session_tokens
 from app.models.study import Study
 from app.providers.validate import validate_agent_pipeline_config
+from app.privacy import queue_privacy_warning_audio, redact_session_data
 from app.realtime import publish_transcript_event
 from app.research.protocol import build_protocol_snapshot
 
@@ -150,7 +152,7 @@ async def twilio_voice_webhook(agent_id: str, request: Request):
 
     logger.info(
         f"Twilio voice webhook: path_agent={agent_id}, resolved_agent={resolved_agent_id}, "
-        f"called_number={called_number}, ws_url={ws_url}"
+        "routing metadata omitted"
     )
 
     # Return TwiML that connects the call to our WebSocket
@@ -311,11 +313,17 @@ async def twilio_media_stream(websocket: WebSocket, agent_id: str):
 
     # ── 4. Build & run Pipecat pipeline with Twilio serializer ────
     final_status = SessionStatus.COMPLETED
+    privacy_redaction_counts: Counter[str] = Counter()
     try:
         from pipecat.pipeline.runner import PipelineRunner
         from app.pipeline.runner import build_twilio_pipeline
 
+        pipeline_task = None
+
         async def _notify(payload: dict):
+            if payload.get("type") == "privacy_warning":
+                privacy_redaction_counts.update(payload.get("categories") or {})
+                await queue_privacy_warning_audio(pipeline_task, payload)
             await publish_transcript_event(str(session_id), payload)
 
         task = await build_twilio_pipeline(
@@ -341,6 +349,7 @@ async def twilio_media_stream(websocket: WebSocket, agent_id: str):
             study_id=agent_cfg["study_id"],
             research_spec=agent_cfg["research_spec"],
         )
+        pipeline_task = task
 
         runner = PipelineRunner(handle_sigint=False, handle_sigterm=False)
 
@@ -357,7 +366,7 @@ async def twilio_media_stream(websocket: WebSocket, agent_id: str):
     except asyncio.CancelledError:
         logger.info(f"Twilio interview {session_id}: task cancelled")
     except Exception as exc:
-        logger.exception(f"Twilio interview {session_id}: pipeline error — {exc}")
+        logger.error(f"Twilio interview {session_id}: pipeline error — {type(exc).__name__}")
         final_status = SessionStatus.ERROR
     finally:
         # ── 5. Finalise session ───────────────────────────────────
@@ -372,6 +381,12 @@ async def twilio_media_stream(websocket: WebSocket, agent_id: str):
                     sess.ended_at = end_time
                     sess.duration_seconds = duration
                     sess.total_tokens = await aggregate_session_tokens(db, session_id)
+                    await redact_session_data(
+                        db,
+                        session_id,
+                        session=sess,
+                        ingress_counts=privacy_redaction_counts,
+                    )
                     await db.commit()
 
             await publish_transcript_event(
@@ -389,5 +404,5 @@ async def twilio_media_stream(websocket: WebSocket, agent_id: str):
             )
         except Exception as cleanup_exc:
             logger.error(
-                f"Twilio interview {session_id}: failed to finalise — {cleanup_exc}"
+                f"Twilio interview {session_id}: failed to finalise — {type(cleanup_exc).__name__}"
             )

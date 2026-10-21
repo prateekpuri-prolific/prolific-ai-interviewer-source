@@ -65,6 +65,8 @@ type OrchestrationProfile = "fixed" | "repair_only" | "semi_structured" | "explo
 interface InterviewGuide {
   questions: InterviewQuestion[];
   orchestration_profile: OrchestrationProfile;
+  conversation_policy?: "contextual_v1" | null;
+  conversation_follow_up_budget?: number;
   closing_message: string;
   allow_follow_ups: boolean;
   skip_answered_questions: boolean;
@@ -111,7 +113,8 @@ function inferOrchestrationProfile(g: Partial<InterviewGuide> | null | undefined
 }
 
 function applyOrchestrationProfile(g: InterviewGuide, profile: OrchestrationProfile): InterviewGuide {
-  return { ...g, orchestration_profile: profile, ...ORCHESTRATION_RULES[profile] };
+  return { ...g, conversation_policy: profile === "exploratory" ? g.conversation_policy : null,
+    orchestration_profile: profile, ...ORCHESTRATION_RULES[profile] };
 }
 
 /**
@@ -119,9 +122,10 @@ function applyOrchestrationProfile(g: InterviewGuide, profile: OrchestrationProf
  * file. Older agents predate `probe_selection`, so it defaults to "ordered"
  * (the prior behaviour).
  */
-function withGuideDefaults(g: Partial<InterviewGuide> | null | undefined): InterviewGuide {
+export function withGuideDefaults(g: Partial<InterviewGuide> | null | undefined): InterviewGuide {
   const profile = inferOrchestrationProfile(g);
   return {
+    ...g,
     questions: (g?.questions ?? []).map((question) => ({
       ...EMPTY_QUESTION,
       ...question,
@@ -300,6 +304,7 @@ function parseGuideJSON(content: string): InterviewGuide {
         throw new Error(`Question ${idx + 1} must have a non-empty 'text' field.`);
       return {
         ...EMPTY_QUESTION,
+        ...q,
         text: q.text,
         probes: Array.isArray(q.probes) ? q.probes.filter((p: unknown) => typeof p === "string") : [],
         max_follow_ups: typeof q.max_follow_ups === "number" ? q.max_follow_ups : 3,
@@ -319,6 +324,9 @@ function parseGuideJSON(content: string): InterviewGuide {
   );
 
   const rawGuide: Partial<InterviewGuide> = {
+    ...obj,
+    conversation_policy: obj.conversation_policy === "contextual_v1" ? "contextual_v1" : null,
+    conversation_follow_up_budget: typeof obj.conversation_follow_up_budget === "number" ? obj.conversation_follow_up_budget : undefined,
     questions,
     closing_message:
       typeof obj.closing_message === "string"

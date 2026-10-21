@@ -88,6 +88,12 @@ class Session(Base):
     research_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
     protocol_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     completion_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Kept separate from transcript entries so experience feedback is never
+    # fed to the interviewer or mistaken for substantive research evidence.
+    post_interview_feedback: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    post_interview_feedback_submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     participant_consent_confirmed: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false"
     )

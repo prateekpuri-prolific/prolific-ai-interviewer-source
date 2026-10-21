@@ -16,6 +16,7 @@ from loguru import logger
 from app.redis import get_redis
 from app.database import async_session_factory
 from app.models.session import Session, SessionStatus
+from app.privacy import redact_session_data
 
 # Redis key prefixes
 _SESSION_KEY = "oasis:session:{session_id}"
@@ -102,10 +103,11 @@ async def cleanup_zombie_sessions() -> int:
                             session.duration_seconds = (
                                 session.ended_at - session.created_at
                             ).total_seconds()
+                        await redact_session_data(db, uuid.UUID(sid), session=session)
                         await db.commit()
                         logger.info(f"Zombie session {sid} marked as timed_out")
             except Exception as e:
-                logger.error(f"Failed to clean up zombie session {sid}: {e}")
+                logger.error(f"Failed to clean up zombie session {sid}: {type(e).__name__}")
 
             await redis.srem(_ACTIVE_SET, sid)
             cleaned += 1
@@ -133,5 +135,5 @@ async def session_cleanup_loop(interval_seconds: int = 60) -> None:
             logger.info("Session cleanup loop cancelled")
             break
         except Exception as e:
-            logger.error(f"Session cleanup loop error: {e}")
+            logger.error(f"Session cleanup loop error: {type(e).__name__}")
             await asyncio.sleep(10)  # Back off on error

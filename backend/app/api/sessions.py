@@ -22,6 +22,8 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.engagement import AdaptiveAction, EngagementEvent, EngagementTurn
 from app.models.session import Session, SessionStatus, TranscriptEntry
+from app.models.privacy_lifecycle import PrivacyDeletionReceipt
+from app.privacy import redact_json, redact_session_data, redact_text
 from app.realtime import publish_transcript_event
 from app.audio.storage import build_session_prefix, get_audio_storage
 from app.schemas.session import (
@@ -52,6 +54,9 @@ async def _get_agent_or_404(
 
 def _apply_filters(stmt, status, date_from, date_to, session_ids=None):
     """Apply common query filters."""
+    # Withhold requested deletions from bulk research exports/listings even
+    # when an active writer or an external-storage failure delayed erasure.
+    stmt = stmt.where(~Session.id.in_(select(PrivacyDeletionReceipt.session_id)))
     if status:
         try:
             stmt = stmt.where(Session.status == SessionStatus(status))
@@ -183,6 +188,11 @@ async def export_sessions_csv(
         "total_questions",
         "initial_response_mode",
         "microphone_check_status",
+        "post_interview_naturalness_rating",
+        "post_interview_repeated_questions",
+        "post_interview_technical_issues",
+        "post_interview_comments",
+        "post_interview_feedback_submitted_at",
         "entry_sequence",
         "role",
         "content",
@@ -214,7 +224,7 @@ async def export_sessions_csv(
         batch_sessions = batch_result.scalars().all()
 
         for session in batch_sessions:
-            completion = session.completion_metadata or {}
+            completion, _ = redact_json(session.completion_metadata or {})
             protocol_completion = completion.get("protocol") or {}
             participant_experience = completion.get("participant_experience") or {}
             completion_fields = [
@@ -223,6 +233,18 @@ async def export_sessions_csv(
                 protocol_completion.get("total_questions", ""),
                 participant_experience.get("initial_response_mode") or "",
                 participant_experience.get("microphone_check_status") or "",
+            ]
+            feedback, _ = redact_json(session.post_interview_feedback or {})
+            feedback_fields = [
+                feedback.get("naturalness_rating", ""),
+                feedback.get("repeated_questions", ""),
+                feedback.get("technical_issues", ""),
+                feedback.get("comments") or "",
+                (
+                    session.post_interview_feedback_submitted_at.isoformat()
+                    if session.post_interview_feedback_submitted_at
+                    else ""
+                ),
             ]
             # Engagement rows key off the user transcript sequence.
             eng_by_seq = {
@@ -255,6 +277,7 @@ async def export_sessions_csv(
                     session.created_at.isoformat(),
                     session.ended_at.isoformat() if session.ended_at else "",
                     *completion_fields,
+                    *feedback_fields,
                     "", "", "", "",
                     "", "", "", "", "", "", "", "",
                 ])
@@ -276,9 +299,10 @@ async def export_sessions_csv(
                         session.created_at.isoformat(),
                         session.ended_at.isoformat() if session.ended_at else "",
                         *completion_fields,
+                        *feedback_fields,
                         entry.sequence,
                         entry.role.value,
-                        entry.content,
+                        redact_text(entry.content).text,
                         entry.spoken_at.isoformat(),
                         eng.score if eng else "",
                         eng.label if eng else "",
@@ -367,14 +391,19 @@ async def export_sessions_json(
                     session.participant_consent_at.isoformat()
                     if session.participant_consent_at else None
                 ),
-                "completion_metadata": session.completion_metadata,
+                "completion_metadata": redact_json(session.completion_metadata)[0],
+                "post_interview_feedback": redact_json(session.post_interview_feedback)[0],
+                "post_interview_feedback_submitted_at": (
+                    session.post_interview_feedback_submitted_at.isoformat()
+                    if session.post_interview_feedback_submitted_at else None
+                ),
                 "created_at": session.created_at.isoformat(),
                 "ended_at": session.ended_at.isoformat() if session.ended_at else None,
                 "transcript": [
                     {
                         "sequence": entry.sequence,
                         "role": entry.role.value,
-                        "content": entry.content,
+                        "content": redact_text(entry.content).text,
                         "spoken_at": entry.spoken_at.isoformat(),
                         "prompt_tokens": entry.prompt_tokens,
                         "completion_tokens": entry.completion_tokens,
@@ -684,7 +713,12 @@ async def get_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return session
+    detail = SessionDetailRead.model_validate(session)
+    detail.completion_metadata = redact_json(detail.completion_metadata)[0]
+    detail.post_interview_feedback = redact_json(detail.post_interview_feedback)[0]
+    for entry in detail.entries:
+        entry.content = redact_text(entry.content).text
+    return detail
 
 
 @router.post("/{session_id}/terminate", status_code=204)
@@ -718,6 +752,7 @@ async def terminate_session(
     session.status = SessionStatus.COMPLETED
     session.ended_at = now
     session.duration_seconds = duration
+    await redact_session_data(db, session_id, session=session)
     await db.commit()
 
     # Notify live monitors that the session ended

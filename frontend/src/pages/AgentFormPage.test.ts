@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { withUnavailableSaved } from "./AgentFormPage";
+import { withUnavailableSaved, withGuideDefaults } from "./AgentFormPage";
 
 describe("withUnavailableSaved", () => {
   const options = [
@@ -20,4 +20,14 @@ describe("withUnavailableSaved", () => {
   it("does not duplicate an available model", () => {
     expect(withUnavailableSaved(options, "openai/gpt-5.6-luna")).toEqual(options);
   });
+});
+
+
+it("preserves contextual policy and depth budget through agent form defaults", () => {
+  const guide = withGuideDefaults({
+    questions: [], orchestration_profile: "exploratory",
+    conversation_policy: "contextual_v1", conversation_follow_up_budget: 8,
+  });
+  expect(guide.conversation_policy).toBe("contextual_v1");
+  expect(guide.conversation_follow_up_budget).toBe(8);
 });

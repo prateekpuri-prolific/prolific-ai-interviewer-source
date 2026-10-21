@@ -22,6 +22,7 @@ Everything is flushed to the DB asynchronously to avoid blocking the pipeline.
 
 import asyncio
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,6 +37,8 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+from app.privacy import PRIVACY_WARNING, redact_text
 
 
 class TranscriptLoggerState:
@@ -53,13 +56,16 @@ class TranscriptLoggerState:
         *,
         notify_callback=None,
         audio_manager=None,
+        privacy_checker=None,
     ):
         self.session_id = session_id
         self.db_session_factory = db_session_factory
         self.notify_callback = notify_callback
         self.audio_manager = audio_manager
+        self.privacy_checker = privacy_checker
         self.sequence: int = 0
         self.agent_buffer: list[str] = []
+        self.privacy_redaction_counts: Counter[str] = Counter()
         self._bg_tasks: set[asyncio.Task] = set()
 
     async def persist_entry(self, role: str, content: str):
@@ -71,6 +77,10 @@ class TranscriptLoggerState:
         add latency to the audio pipeline's turn path.
         """
         from app.models.session import TranscriptEntry, SpeakerRole
+
+        redaction = redact_text(content)
+        content = redaction.text
+        self.privacy_redaction_counts.update(redaction.counts)
 
         if not content.strip():
             return
@@ -90,13 +100,19 @@ class TranscriptLoggerState:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    async def redact_user_text(self, content: str):
+        """Apply the contextual checker when configured, else local rules."""
+        if self.privacy_checker:
+            return await self.privacy_checker(content)
+        return redact_text(content)
+
     async def _write_and_notify(self, entry, role: str) -> None:
         try:
             async with self.db_session_factory() as db:
                 db.add(entry)
                 await db.commit()
         except Exception as exc:
-            logger.error(f"TranscriptLogger: failed to persist entry: {exc}")
+            logger.error(f"TranscriptLogger: failed to persist entry: {type(exc).__name__}")
 
         if self.notify_callback:
             try:
@@ -150,8 +166,33 @@ class TranscriptUserCapture(FrameProcessor):
         if isinstance(frame, TranscriptionFrame):
             # Final user transcription → flush any pending agent text first
             await self._state.flush_agent_buffer()
-            await self._state.persist_entry("user", frame.text)
-            await self.push_frame(frame, direction)
+            redaction = await self._state.redact_user_text(frame.text)
+            self._state.privacy_redaction_counts.update(redaction.counts)
+            await self._state.persist_entry("user", redaction.text)
+            if redaction.detected and self._state.notify_callback:
+                try:
+                    await self._state.notify_callback(
+                        {
+                            "type": "privacy_warning",
+                            "text": PRIVACY_WARNING,
+                            "categories": redaction.counts,
+                        }
+                    )
+                except Exception:
+                    pass
+            safe_frame = frame
+            if redaction.detected:
+                # Do not forward the provider's raw STT result: it commonly
+                # contains a duplicate copy of the unredacted transcript.
+                safe_frame = TranscriptionFrame(
+                    text=redaction.text,
+                    user_id=frame.user_id,
+                    timestamp=frame.timestamp,
+                    language=frame.language,
+                    result=None,
+                    finalized=frame.finalized,
+                )
+            await self.push_frame(safe_frame, direction)
             return
 
         if self._state.audio_manager and isinstance(frame, UserStartedSpeakingFrame):
@@ -203,5 +244,5 @@ class TranscriptLogger(FrameProcessor):
             try:
                 await self._state.audio_manager.finalize_session()
             except Exception as exc:
-                logger.error(f"TranscriptLogger: audio session finalize failed: {exc}")
+                logger.error(f"TranscriptLogger: audio session finalize failed: {type(exc).__name__}")
         await super().cleanup()

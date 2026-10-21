@@ -272,6 +272,8 @@ export default function SessionDetailPage() {
     })),
     ...newLiveEntries,
   ].sort((a, b) => a.sequence - b.sequence);
+  const participantFeedback = session.post_interview_feedback;
+  const naturalnessRating = Number(participantFeedback?.naturalness_rating);
 
   const handleDownload = async (format: "csv" | "json") => {
     try {
@@ -443,6 +445,42 @@ export default function SessionDetailPage() {
           </div>
         )}
       </div>
+
+      {participantFeedback && (
+        <div className="mb-6 card overflow-hidden">
+          <div className="border-b border-gray-100 bg-gray-50/50 px-5 py-3.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+              Participant experience survey
+            </span>
+          </div>
+          <div className="px-5 py-5">
+            <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-3">
+              <div>
+                <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400">Conversation naturalness</span>
+                <span className="font-medium text-gray-900">{Number.isFinite(naturalnessRating) ? `${naturalnessRating} / 5` : "—"}</span>
+              </div>
+              <div>
+                <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400">Asked for answered material</span>
+                <span className="font-medium text-gray-900">{participantFeedback.repeated_questions === true ? "Yes" : participantFeedback.repeated_questions === false ? "No" : "—"}</span>
+              </div>
+              <div>
+                <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400">Technical problems</span>
+                <span className="font-medium text-gray-900">{participantFeedback.technical_issues === true ? "Yes" : participantFeedback.technical_issues === false ? "No" : "—"}</span>
+              </div>
+            </div>
+            {typeof participantFeedback.comments === "string" && participantFeedback.comments.trim() && (
+              <div className="mt-4 border-t border-gray-100 pt-4">
+                <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400">Participant comment</span>
+                <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-gray-700">{participantFeedback.comments}</p>
+              </div>
+            )}
+            <p className="mt-4 text-xs text-gray-400">
+              Stored separately from the research transcript
+              {session.post_interview_feedback_submitted_at ? ` · submitted ${new Date(session.post_interview_feedback_submitted_at).toLocaleString()}` : ""}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* ── Engagement metrics ── */}
       {engagement && (

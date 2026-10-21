@@ -238,6 +238,27 @@ describe("Widget API", () => {
     const result = await widget.config("abc123");
     expect(result.widget_key).toBe("abc123");
   });
+
+  it("submits post-interview feedback to the session-scoped endpoint", async () => {
+    globalThis.fetch = mockFetch({ submitted: true, already_submitted: false });
+
+    await widget.submitFeedback("abc123", "session-1", {
+      token: "token-value",
+      naturalness_rating: 4,
+      repeated_questions: false,
+      technical_issues: true,
+      comments: "A microphone retry was confusing.",
+    });
+
+    const [url, options] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe("/api/widget/abc123/sessions/session-1/feedback");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toMatchObject({
+      naturalness_rating: 4,
+      repeated_questions: false,
+      technical_issues: true,
+    });
+  });
 });
 
 // ── Participants API ─────────────────────────────────────────────

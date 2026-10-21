@@ -54,6 +54,7 @@ from app.audio.recording import (
     UserAudioTap,
 )
 from app.audio.storage import build_session_prefix, get_audio_storage
+from app.privacy import redact_text, redact_text_with_llm
 
 
 # ── OpenAI EU data-residency endpoints ─────────────────────────────────────
@@ -113,7 +114,7 @@ async def _setup_audio_recording(
         session_id=session_id,
         pipeline_type=pipeline_type,
     )
-    logger.info(f"Audio recording enabled for session {session_id} at {prefix}")
+    logger.info(f"Audio recording enabled for session {session_id}")
     return manager, UserAudioTap(manager), AgentAudioTap(manager)
 
 
@@ -129,6 +130,19 @@ async def _get_key(field: str) -> str:
         return await get_effective_key(field)
     except Exception:
         return getattr(settings, field, "")
+
+
+async def _redact_participant_text(value: str):
+    """Run local minimisation and the configured contextual privacy layer."""
+    if not settings.privacy_llm_enabled:
+        return redact_text(value)
+    return await redact_text_with_llm(
+        value,
+        api_key=await _get_key("openai_api_key"),
+        model=settings.privacy_llm_model,
+        api_base=await _openai_base_url(),
+        timeout_seconds=settings.privacy_llm_timeout_seconds,
+    )
 
 
 def _v2v_system_prompt_with_welcome(
@@ -233,6 +247,7 @@ async def build_twilio_pipeline(
         session_id=session_id,
         db_session_factory=async_session_factory,
         notify_callback=notify_callback,
+        privacy_checker=_redact_participant_text,
     )
     user_capture = TranscriptUserCapture(transcript_state)
     transcript_logger = TranscriptLogger(transcript_state)
@@ -356,7 +371,7 @@ async def build_pipeline(
                     {"type": "progress", "current": current, "total": total}
                 )
             except Exception as exc:
-                logger.debug(f"Progress send failed (non-fatal): {exc}")
+                logger.debug(f"Progress send failed (non-fatal): {type(exc).__name__}")
 
         _progress_callback = _send_progress
 
@@ -389,6 +404,7 @@ async def build_pipeline(
         db_session_factory=async_session_factory,
         notify_callback=notify_callback,
         audio_manager=audio_manager,
+        privacy_checker=_redact_participant_text,
     )
     user_capture = TranscriptUserCapture(transcript_state)
     transcript_logger = TranscriptLogger(transcript_state)
@@ -496,7 +512,7 @@ async def _study_has_knowledge(study_id: uuid.UUID) -> bool:
             count = result.scalar() or 0
             return count > 0
     except Exception as e:
-        logger.warning(f"Could not check knowledge documents for study={study_id}: {e}")
+        logger.warning(f"Could not check knowledge documents for study={study_id}: {type(e).__name__}")
         return False
 
 
@@ -553,8 +569,8 @@ def _register_rag_tool(llm_service, study_id: uuid.UUID):
             )
 
         except Exception as e:
-            logger.exception(f"RAG search error: {e}")
-            await result_callback(f"Error searching knowledge base: {e}")
+            logger.error(f"RAG search error: {type(e).__name__}")
+            await result_callback(f"Error searching knowledge base: {type(e).__name__}")
 
     llm_service.register_function(
         "search_knowledge_base",

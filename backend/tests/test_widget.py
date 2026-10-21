@@ -5,10 +5,15 @@ This is a public-facing endpoint (no auth) so it's security-relevant.
 """
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.session import Session, SessionStatus
+from app.research.participant_feedback import participant_feedback_token
 
 
 class TestWidgetEndpoint:
@@ -73,6 +78,121 @@ class TestWidgetEndpoint:
         resp = await client.get("/api/widget/any-key")
         # Should return 404 (not 401 or 403)
         assert resp.status_code == 404
+
+    async def test_completed_session_accepts_separate_optional_feedback(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        study = (await client.post(
+            "/api/studies", json={"title": "Feedback study"}
+        )).json()
+        agent = (await client.post(
+            f"/api/studies/{study['id']}/agents",
+            json={"name": "Feedback agent", "status": "active"},
+        )).json()
+        session = Session(
+            id=uuid.uuid4(),
+            agent_id=uuid.UUID(agent["id"]),
+            status=SessionStatus.COMPLETED,
+            ended_at=datetime.now(timezone.utc),
+        )
+        db_session.add(session)
+        await db_session.commit()
+        token = participant_feedback_token(agent["widget_key"], session.id)
+        body = {
+            "token": token,
+            "naturalness_rating": 4,
+            "repeated_questions": False,
+            "technical_issues": True,
+            "comments": "The microphone stopped once.",
+        }
+
+        response = await client.post(
+            f"/api/widget/{agent['widget_key']}/sessions/{session.id}/feedback",
+            json=body,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"submitted": True, "already_submitted": False}
+
+        await db_session.refresh(session)
+        assert session.post_interview_feedback == {
+            "survey_version": "participant_experience_v1",
+            "naturalness_rating": 4,
+            "repeated_questions": False,
+            "technical_issues": True,
+            "comments": "The microphone stopped once.",
+        }
+        assert session.post_interview_feedback_submitted_at is not None
+
+        retry = await client.post(
+            f"/api/widget/{agent['widget_key']}/sessions/{session.id}/feedback",
+            json=body,
+        )
+        assert retry.status_code == 200
+        assert retry.json()["already_submitted"] is True
+
+    async def test_feedback_comments_are_redacted_before_storage(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        study = (await client.post(
+            "/api/studies", json={"title": "Private feedback study"}
+        )).json()
+        agent = (await client.post(
+            f"/api/studies/{study['id']}/agents",
+            json={"name": "Private feedback agent", "status": "active"},
+        )).json()
+        session = Session(
+            id=uuid.uuid4(),
+            agent_id=uuid.UUID(agent["id"]),
+            status=SessionStatus.COMPLETED,
+            ended_at=datetime.now(timezone.utc),
+        )
+        db_session.add(session)
+        await db_session.commit()
+        token = participant_feedback_token(agent["widget_key"], session.id)
+
+        response = await client.post(
+            f"/api/widget/{agent['widget_key']}/sessions/{session.id}/feedback",
+            json={
+                "token": token,
+                "naturalness_rating": 4,
+                "repeated_questions": False,
+                "technical_issues": False,
+                "comments": "Contact me at private@example.com",
+            },
+        )
+
+        assert response.status_code == 200
+        await db_session.refresh(session)
+        assert session.post_interview_feedback["comments"] == "Contact me at [EMAIL]"
+
+    async def test_feedback_rejects_invalid_token_and_active_session(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        study = (await client.post(
+            "/api/studies", json={"title": "Feedback security"}
+        )).json()
+        agent = (await client.post(
+            f"/api/studies/{study['id']}/agents",
+            json={"name": "Feedback security agent", "status": "active"},
+        )).json()
+        session = Session(
+            id=uuid.uuid4(),
+            agent_id=uuid.UUID(agent["id"]),
+            status=SessionStatus.ACTIVE,
+        )
+        db_session.add(session)
+        await db_session.commit()
+        url = f"/api/widget/{agent['widget_key']}/sessions/{session.id}/feedback"
+        body = {
+            "token": "x" * 64,
+            "naturalness_rating": 3,
+            "repeated_questions": False,
+            "technical_issues": False,
+        }
+        assert (await client.post(url, json=body)).status_code == 403
+
+        body["token"] = participant_feedback_token(agent["widget_key"], session.id)
+        assert (await client.post(url, json=body)).status_code == 409
 
     async def test_widget_config_returns_required_fields(self, client: AsyncClient):
         """Verify all fields needed by the frontend widget are present."""

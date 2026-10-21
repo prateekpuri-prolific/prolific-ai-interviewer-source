@@ -40,6 +40,8 @@ class SessionRead(BaseModel):
     research_protocol_version: Optional[str] = None
     research_stage: Optional[str] = None
     completion_metadata: Optional[dict] = None
+    post_interview_feedback: Optional[dict] = None
+    post_interview_feedback_submitted_at: Optional[datetime] = None
     participant_consent_confirmed: bool = False
     participant_consent_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
