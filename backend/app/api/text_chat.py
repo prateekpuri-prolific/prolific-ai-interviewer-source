@@ -490,6 +490,7 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
             if decision is None and repair_decision is not None:
                 decision = repair_decision
                 controller.events.append({"action": "repair_marker_recovered", "intent": decision.intent})
+            decision = controller.canonical_decision(decision)
             if decision is not None:
                 repair_decision = decision
             move = controller.validate_turn(text, decision, participant_text)

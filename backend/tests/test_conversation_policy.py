@@ -365,7 +365,7 @@ def test_other_ai_use_cannot_create_chatbot_nonuse_premise():
     c = nonuse_controller()
     c.ai_use = "uses_ai"
     wording = c.main_wording(c.ids["nonuse"])
-    assert wording == "Have you used AI chatbots that you can have a conversation with?"
+    assert wording == "Which AI tool have you been using?"
     assert "not" not in wording
 
 
@@ -525,3 +525,119 @@ def test_later_chatbot_correction_can_reopen_nonuse_without_stale_overwrite():
     c.apply_observation(obs)
     assert c.chatbot_use == 'no_chatbot_use'
     assert c.states[c.ids['nonuse']].coverage == 'missing'
+
+
+def test_episode_gap_survives_adequate_coverage_and_blocks_topic_jump():
+    c = controller(answer='I asked AI to help with fractions.')
+    obs = observation(c, opportunities=False)
+    obs.experience_gap = Opportunity(topic_id='recent_encounter', move='evaluation',
+        purpose='Understand how that episode went', anchor_sequence=6,
+        anchor_quote=c.history[-1]['answer'], priority='medium')
+    c.apply_observation(obs)
+    move, decision = probe_move(c)
+    assert move['priority'] == 'high'
+    assert c.states[c.ids['recent_encounter']].coverage == 'adequate'
+    assert c.validate_turn('How did that go?', decision, c.history[-1]['answer']) == move
+    main = next(m for m in c.eligible_moves() if m['action'] == 'main')
+    with pytest.raises(ConversationRepair, match='valuable'):
+        c.validate_turn(main['wording'], TurnDecision('main', main['question'], main['intent']), '')
+
+
+@pytest.mark.parametrize('boundary', ['time', 'declined', 'fabricated', 'already_moved_on'])
+def test_episode_gap_cannot_override_limits_or_grounding(boundary):
+    c = controller(answer='I tried it for a recipe.')
+    obs = observation(c, coverage='declined' if boundary == 'declined' else 'adequate', opportunities=False)
+    obs.experience_gap = Opportunity(topic_id='recent_encounter', move='evaluation',
+        purpose='Understand the outcome', anchor_sequence=6,
+        anchor_quote='invented account' if boundary == 'fabricated' else c.history[-1]['answer'], priority='high')
+    if boundary == 'time': c.remaining_seconds = 30
+    if boundary == 'already_moved_on': c.current_question_index = c.ids['vision']
+    c.apply_observation(obs)
+    assert all(m['action'] not in {'probe', 'thread'} for m in c.eligible_moves())
+
+
+def test_research_only_use_preserves_everyday_nonuse_and_its_reason():
+    c = nonuse_controller()
+    c.current_question_index = c._last_question_index = c.ids['nonuse']
+    c.states[c.ids['nonuse']].asked = True
+    c._last_text = 'What has shaped whether you use AI chatbots?'
+    c.note_answer('I use chatbots only in research studies. I prefer thinking things through myself.', 16)
+    obs = observation(c, opportunities=False)
+    obs.chatbot_use = 'research_only'; obs.chatbot_use_quote = c.history[-1]['answer']; obs.chatbot_use_sequence = 16
+    c.apply_observation(obs)
+    assert c.chatbot_use == 'research_only'
+    assert c.states[c.ids['nonuse']].coverage == 'adequate'
+    assert c.states[c.ids['nonuse']].stopped_reason != 'confirmed_chatbot_use'
+    assert c.eligible_moves()[-1]['intent'] == 'close:main'
+
+
+def test_research_only_correction_reopens_incorrect_nonuse_skip():
+    c = nonuse_controller()
+    c.note_answer('I use a chatbot.', 4)
+    obs = observation(c, opportunities=False)
+    obs.chatbot_use = 'uses_chatbots'; obs.chatbot_use_quote = c.history[-1]['answer']; obs.chatbot_use_sequence = 4
+    c.apply_observation(obs)
+    c.note_answer('Only in research studies, never outside them.', 6)
+    obs = observation(c, opportunities=False)
+    obs.chatbot_use = 'research_only'; obs.chatbot_use_quote = c.history[-1]['answer']; obs.chatbot_use_sequence = 6
+    c.apply_observation(obs)
+    assert c.states[c.ids['nonuse']].coverage == 'missing'
+    assert c.main_wording(c.ids['nonuse']).startswith('Outside research studies')
+
+
+def test_main_tag_shorthand_cannot_authorize_an_ineligible_move():
+    c = controller()
+    c.apply_observation(observation(c))
+    main = next(m for m in c.eligible_moves() if m['action'] == 'main')
+    shorthand = TurnDecision('main', main['question'], 'vision')
+    decision = c.canonical_decision(shorthand)
+    assert decision.intent == 'vision:main'
+    with pytest.raises(ConversationRepair, match='valuable'):
+        c.validate_turn(main['wording'], decision, '')
+    wrong = TurnDecision('main', 1, 'everyday_use')
+    assert c.canonical_decision(wrong) == wrong
+    with pytest.raises(ConversationRepair, match='not eligible'):
+        c.validate_turn('Do you use AI?', wrong, '')
+
+
+def test_unclear_chatbot_use_cannot_retire_nonuse_from_generic_ai_evidence():
+    c = nonuse_controller()
+    c.current_question_index = c._last_question_index = c.ids['nonuse']
+    c.note_answer('I use AI for learning.', 8)
+    obs = observation(c, coverage='not_applicable', opportunities=False)
+    c.apply_observation(obs)
+    assert c.chatbot_use == 'unclear'
+    assert c.states[c.ids['nonuse']].coverage == 'missing'
+    assert c.main_wording(c.ids['nonuse']) == 'Have you used AI chatbots that you can have a conversation with?'
+
+
+def test_recent_experience_thread_can_continue_without_nested_topic_jump():
+    c = controller(topic='everyday_use', answer='Sometimes friends show me AI.')
+    c.states[c.ids['recent_encounter']].coverage = 'partial'
+    op = Opportunity(topic_id='recent_encounter', move='develop_experience', purpose='Identify an episode',
+        anchor_sequence=6, anchor_quote=c.history[-1]['answer'], priority='high')
+    obs = observation(c, opportunities=False); obs.opportunities = [op]
+    c.apply_observation(obs)
+    move = next(m for m in c.eligible_moves() if m['action'] == 'thread')
+    c.accept_turn('What were your friends doing that time?', TurnDecision('thread', 2, move['intent']), move)
+    c.note_answer('They were checking a claim about a film.', 8)
+    obs = observation(c, opportunities=False)
+    obs.experience_gap = Opportunity(topic_id='recent_encounter', move='evaluation', purpose='Understand the experience',
+        anchor_sequence=8, anchor_quote=c.history[-1]['answer'], priority='high')
+    c.apply_observation(obs)
+    move = next(m for m in c.eligible_moves() if m['action'] == 'thread')
+    assert move['topic_id'] == 'recent_encounter'
+    assert c.validate_turn('How did that go?', TurnDecision('thread', 2, move['intent']), '') == move
+    c.states[c.ids['recent_encounter']].follow_ups = 3
+    assert not any(m['action'] == 'thread' for m in c.eligible_moves())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('quote,accepted', [('learn how to repair bicycles', False), ('invented participant answer', True)])
+async def test_checker_reuse_evidence_is_grounded_and_overrides_inconsistent_verdict(monkeypatch, quote, accepted):
+    import app.pipeline.conversation_policy as policy
+    result = QuestionCheck(acceptable=True, issue='none', correction='', answer_reuse_quote=quote)
+    monkeypatch.setattr(policy, '_structured_call', AsyncMock(return_value=(result, {})))
+    check, _ = await policy.check_question(payload={'conversation': [{'answer': 'It should help people learn how to repair bicycles.'}]})
+    assert check.acceptable is accepted
+    if not accepted: assert check.issue == 'already_answered'

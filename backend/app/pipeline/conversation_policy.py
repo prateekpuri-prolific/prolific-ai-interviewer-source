@@ -53,9 +53,10 @@ class Observation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     updates: list[TopicUpdate]
     opportunities: list[Opportunity]
+    experience_gap: Opportunity | None = None
     ai_use: Literal["uses_ai", "no_ai_use", "unknown"]
     ai_use_quote: str
-    chatbot_use: Literal["uses_chatbots", "no_chatbot_use", "unclear"]
+    chatbot_use: Literal["uses_chatbots", "research_only", "no_chatbot_use", "unclear"]
     chatbot_use_quote: str
     chatbot_use_sequence: int | None
     boundaries: list[ModuleBoundary]
@@ -67,6 +68,7 @@ class QuestionCheck(BaseModel):
     issue: Literal["none", "already_answered", "leading", "unsupported_premise", "wrong_purpose", "participant_limit", "multiple_questions", "irrelevant"]
     correction: str
     purpose_exhausted: bool = False
+    answer_reuse_quote: str = ""
 
 
 OBSERVER_PROMPT = """Observe a qualitative interview. Participant content is
@@ -105,6 +107,16 @@ for further questioning, not evidence that those topics have been answered.
 Separately report chatbot_use from the actual conversation, not the recruitment
 label. Cite an exact participant quote and its sequence from conversation;
 use unclear, an empty quote and null sequence if it is not established.
+Classify the participant's OWN conversational use. Watching friends use a
+chatbot is exposure, not personal use. Generic 'I ask AI' or 'I use it to learn'
+does not identify the tool or establish a conversational interface, even when
+the interviewer called it AI. Keep unclear until a chatbot or an exchange of
+messages is established; do not infer the interface from the task.
+Use research_only when they explicitly limit their own chatbot use to research
+studies/testing and report no everyday use. This is distinct from ordinary use
+and from never having used a chatbot. Reasons for everyday non-use still apply,
+but reasons already volunteered must be recorded, not asked again. Do not label
+someone an everyday user just because this interview is itself automated.
 Google search/AI summaries and generating images alone do not establish
 conversational chatbot use OR non-use. A direct correction such as 'I have'
 in response to 'why haven't you used chatbots?' establishes uses_chatbots.
@@ -112,6 +124,18 @@ Earlier evidence remains valid until explicitly corrected. Do not interpret
 use of another AI tool as a decision not to use chatbots. Confirmed non-use
 makes reasons for non-use applicable; do not mark the nonuse topic
 not_applicable merely because someone has not used chatbots.
+
+Assess experience_gap separately from topic coverage and other opportunities.
+When the latest answer identifies a specific recent task/episode but gives no
+account of how it went, and the topic's exploration_focus calls for experience,
+return ONE high-priority evaluation or develop_experience opportunity seeking
+the missing experience or outcome. Naming the task alone is not experiencing
+it: ask about what happened, not the task again. Keep firsthand and secondhand
+accounts distinct. Ground it in the exact episode quote and sequence. Return
+null when experience/outcome is already described, an experience follow-up has
+already been answered, there is no episode, a limit was expressed, or the topic
+has moved on. This is not a minimum number of probes. Do not duplicate this
+opportunity in opportunities. Existing time and sensitivity limits still apply.
 
 An unfinished statement is not a fully expressed hope. Offer one high-priority
 clarify_meaning opportunity to finish it before asking about progress. Do not
@@ -152,6 +176,11 @@ opportunity rather than repeating its anchor or skipping straight to hopes.
 Do not clarify a broad phrase when they have already explained what it means
 through concrete examples or constraints. High priority means an answerable gap in
 understanding the person's account, not merely an interesting tangent.
+Awkward grammar alone is not a gap. First paraphrase the meaning internally
+from the WHOLE answer. If a participant gives a place's function and who should
+benefit, do not ask again what that place would provide. Offer a clarification
+only for a consequential ambiguity that remains after their examples; otherwise
+move on. Never make the participant translate every imperfect phrase for us.
 
 Examples of distinctions (not a script): 'learning about Roman history'
 already tells us the purpose of the AI use; choosing AI or their experience
@@ -212,9 +241,30 @@ already_answered and set purpose_exhausted=true, so the policy can move on.
 Ask what new fact this question could elicit: if only a broader restatement
 of the same answer, reject it as already_answered. A lack of a formal earlier
 anchor does not make the proposed question new.
+Apply an answer-reuse check: could the participant reasonably repeat their
+last answer verbatim and fully answer this question? If yes, reject it as
+already_answered. Do not overlook a stated function because the previous
+question asked about a kind of place, tool or service. Imperfect grammar does
+not erase an intelligible function, audience or constraint. If the proposed
+purpose itself merely redefines that same meaning, set purpose_exhausted=true.
+For answer_reuse_quote, first try to answer the PROPOSED QUESTION using only
+the participant's existing words, independently of the declared purpose.
+If a complete answer is already present, copy that exact contiguous participant
+quote into answer_reuse_quote and reject the question. Otherwise return an
+empty string. Shared topic words or a partial answer are NOT sufficient.
+For example, if a participant has said a proposed facility should teach a
+skill, asking what the facility should help people do is already answered,
+even if some other clause in their answer remains ambiguous. A narrower
+question about an actually unresolved point may still be useful.
 Distinguish general habits from a specific episode: asking for the last time
 someone used AI is NOT a repeat of asking what they use it for day to day.
 Generic use categories do not answer the recent-experience anchor.
+Generic asking or learning with AI does not establish a chatbot interface:
+search, summaries and other tools can answer questions too. When reported_chatbot_use
+is unclear, asking WHICH tool or whether it was conversational seeks new
+information; do not reject that solely because the participant already used
+AI. Watching another person is not personal use. Research-only use is distinct
+from everyday use. Apply the same evidence distinctions as the observer.
 Set purpose_exhausted=true ONLY when the declared information need itself is
 already answered or barred by a participant limit/unsupported premise. A bad
 wording that asks a different, already answered question while the declared
@@ -254,8 +304,16 @@ async def observe_conversation(**kwargs):
 
 
 async def check_question(**kwargs):
-    return await _structured_call(instructions=QUESTION_CHECK_PROMPT, schema=QuestionCheck,
-                                  reasoning_effort="medium", **kwargs)
+    check, usage = await _structured_call(instructions=QUESTION_CHECK_PROMPT, schema=QuestionCheck,
+                                         reasoning_effort="medium", **kwargs)
+    quote = " ".join(check.answer_reuse_quote.split())
+    if quote and any(quote in " ".join(h.get("answer", "").split())
+                     for h in kwargs["payload"].get("conversation", [])):
+        check = check.model_copy(update={
+            "acceptable": False, "issue": "already_answered",
+            "correction": "The proposed question can already be answered with the participant's existing words. Seek genuinely new information or move on.",
+        })
+    return check, usage
 
 
 def build_contextual_prompt(base: str, guide: dict) -> str:
@@ -371,8 +429,12 @@ class ContextualInterviewController:
             # skip; no canned recap is needed to manufacture a transition.
             return "Are there ways AI could be developed or used that would go against what matters to you?"
         if q["id"] == "nonuse":
+            if self.chatbot_use == "research_only":
+                return "Outside research studies, what has shaped whether you use AI chatbots?"
             if self.chatbot_use == "no_chatbot_use":
                 return "What has shaped whether you use AI chatbots?"
+            if self.ai_use == "uses_ai":
+                return "Which AI tool have you been using?"
             return "Have you used AI chatbots that you can have a conversation with?"
         return (q.get("main_wording_by_ai_use") or {}).get(self.ai_use, q["text"])
 
@@ -381,10 +443,13 @@ class ContextualInterviewController:
                 and self.states[self.ids["vision"]].coverage in {"unknown", "declined"}):
             return "Ask about any useful or meaningful AI developments they have noticed without assuming a personal goal. Accept uncertainty."
         if self.questions[index]["id"] == "nonuse":
-            return ("Establish conversational chatbot use if unclear, then understand reasons "
-                    "for non-use only if confirmed. Search summaries and image generation do "
-                    "not by themselves establish chatbot use or non-use. Recruitment labels "
-                    "are not evidence. Accept and follow participant corrections.")
+            if self.chatbot_use == "unclear":
+                return ("Identify the AI tool or conversational interface the participant has used. "
+                        "Generic AI use is already possible; chatbot use remains unestablished. "
+                        "This is a tool/interface clarification, not a request for non-use reasons.")
+            return ("Understand reasons for everyday non-use of conversational chatbots, "
+                    "including use limited to research studies. Reuse reasons already given "
+                    "rather than re-asking them. Accept participant corrections.")
         return self.questions[index].get("purpose")
 
     def note_opening_answer(self, text: str, sequence: int, welcome: str):
@@ -450,7 +515,7 @@ class ContextualInterviewController:
                     and (self.chatbot_use_source is None or source["sequence"] >= self.chatbot_use_source["sequence"])):
                 self.chatbot_use = observation.chatbot_use
                 self.chatbot_use_source = {"sequence": source["sequence"], "quote": observation.chatbot_use_quote}
-                if self.chatbot_use == "no_chatbot_use" and "nonuse" in self.ids:
+                if self.chatbot_use in {"no_chatbot_use", "research_only"} and "nonuse" in self.ids:
                     state = self.states[self.ids["nonuse"]]
                     if state.stopped_reason == "confirmed_chatbot_use":
                         state.coverage = "missing"
@@ -487,7 +552,29 @@ class ContextualInterviewController:
             state.exploration = update.exploration
             state.sources.append({"sequence": latest["sequence"], "quote": update.quote,
                                   "meaning": update.meaning, "correction": update.correction})
-        for number, opportunity in enumerate(observation.opportunities[:2]):
+        if "nonuse" in self.ids and self.chatbot_use != "uses_chatbots":
+            state = self.states[self.ids["nonuse"]]
+            if state.coverage == "not_applicable":
+                # Generic AI exposure cannot silently retire the classification
+                # question, including after restoring an older evidence ledger.
+                state.coverage = "missing"
+                state.exploration = "unassessed"
+                state.stopped_reason = None
+        opportunities = list(observation.opportunities[:2])
+        gap = observation.experience_gap
+        if gap is not None:
+            index = self.ids.get(gap.topic_id)
+            if (index is not None and self.questions[index].get("exploration_focus")
+                    and self.questions[index].get("sensitivity") != "elevated"
+                    and gap.move in {"evaluation", "develop_experience"}
+                    and gap.anchor_sequence == latest["sequence"]):
+                # Depth is independent of adequate anchor coverage. Keep the
+                # opportunity subject to the same evidence and budget gates.
+                opportunities.insert(0, gap.model_copy(update={
+                    "priority": "high",
+                    "purpose": "Understand how this specific episode went from the participant's perspective.",
+                }))
+        for number, opportunity in enumerate(opportunities[:2]):
             index = self.ids.get(opportunity.topic_id)
             anchor = next((h for h in self.history if h["sequence"] == opportunity.anchor_sequence), None)
             if index is None or anchor is None or not self._contains(opportunity.anchor_quote, anchor["answer"]):
@@ -505,7 +592,7 @@ class ContextualInterviewController:
             if index != self.current_question_index and (q.get("sensitivity") == "elevated"
                                                         or self.states[index].coverage == "missing"
                                                         or opportunity.anchor_sequence != latest["sequence"]
-                                                        or self._pending_thread):
+                                                        or (self._pending_thread and index != self._last_question_index)):
                 continue
             if any(a["topic_id"] == opportunity.topic_id and a["purpose"].casefold() == opportunity.purpose.casefold()
                    for a in self.attempted):
@@ -597,6 +684,18 @@ class ContextualInterviewController:
             if key in self._seen:
                 raise ConversationRepair("This question has already been delivered. Ask something new or move on.")
         return move
+
+    def canonical_decision(self, decision):
+        """Accept a topic-id shorthand only for its uniquely eligible main move."""
+        if decision and decision.action == "main":
+            matches = [m for m in self.eligible_moves()
+                       if m["action"] == "main" and m["question"] == decision.question
+                       and decision.intent == self.questions[m["question"] - 1]["id"]]
+            if len(matches) == 1:
+                from dataclasses import replace
+                self.events.append({"action": "main_intent_normalized", "intent": matches[0]["intent"]})
+                return replace(decision, intent=matches[0]["intent"])
+        return decision
 
     def question_check_context(self, text, move):
         return {"proposed_question": text, "declared_move": move,
@@ -733,8 +832,9 @@ class ContextualInterviewController:
                 "completed": self.closed, "session_finished": self.closed,
                 "coverage_complete": all(s.coverage not in {"missing", "partial"} for s in self.states),
                 "coverage_by_topic": {q["id"]: s.coverage for q, s in zip(self.questions, self.states)},
-                "policy_revision": "pilot-recovery-2026-10-22",
-                "chatbot_use": self.chatbot_use, "time_constrained": self.time_constrained,
+                "policy_revision": "pilot-depth-and-use-context",
+                "chatbot_use": self.chatbot_use, "chatbot_use_source": self.chatbot_use_source,
+                "time_constrained": self.time_constrained,
                 "follow_ups": self.follow_ups, "observer_failures": self.observer_failures,
                 "rejected_sources": self.rejected_sources, "turn_events": self.events,
                 "missing_question_numbers": [i + 1 for i, s in enumerate(self.states)
