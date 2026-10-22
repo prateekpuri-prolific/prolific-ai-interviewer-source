@@ -474,7 +474,8 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
     last_issue = "generation_failed"
     review = None
-    repeated_anchor = None
+    rejected_anchors = []
+    repair_decision = None
     for attempt in range(2):
         raw = ""
         try:
@@ -484,6 +485,13 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
             raw = result["content"]
             text, marker, decision = strip_control_markers(raw)
             text = text.strip()
+            # Repair may omit its routing tag. Recover only the previously
+            # selected move; validate eligibility and semantics again below.
+            if decision is None and repair_decision is not None:
+                decision = repair_decision
+                controller.events.append({"action": "repair_marker_recovered", "intent": decision.intent})
+            if decision is not None:
+                repair_decision = decision
             move = controller.validate_turn(text, decision, participant_text)
             if decision.action not in {"close", "clarify"}:
                 check, check_usage = await asyncio.wait_for(check_question(
@@ -501,8 +509,10 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
                                               "proposed_text": text})
                 elif not check.acceptable or check.issue != "none":
                     controller.record_rejection(text, check.issue, check.correction)
-                    if move["action"] == "main" and check.issue == "already_answered":
-                        repeated_anchor = move
+                    if move["action"] == "main" and check.issue in {"already_answered", "unsupported_premise"}:
+                        rejected_anchors.append((move, check.issue))
+                    if check.purpose_exhausted or check.issue == "participant_limit":
+                        controller.retire_rejected_opportunity(move, check.issue)
                     controller.defer_rejected_anchor(move, check.issue)
                     raise ConversationRepair(check.correction or check.issue)
             review = controller.accept_turn(text, decision, move)
@@ -519,8 +529,8 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
                             "Repair it once using an eligible move. " + last_issue})
             context.append({"role": "system", "content": controller.authoritative_model_note()})
     if review is None:
-        if repeated_anchor:
-            controller.defer_rejected_anchor(repeated_anchor, "already_answered", final=True)
+        for rejected_anchor, issue in rejected_anchors:
+            controller.defer_rejected_anchor(rejected_anchor, issue, final=True)
         review = controller.fallback_turn(last_issue)
     return {"content": control_marker_prefix(review.marker, review.decision) + " " + review.text,
             **usage}, review
@@ -1386,9 +1396,11 @@ async def text_chat_ws(
                     continue
 
             if (isinstance(structured_controller, ContextualInterviewController)
-                    and structured_controller._last_text
                     and classify_participant_turn(user_text, agent_cfg["language"] or "en", infer_incomplete=False) == "answer"):
-                structured_controller.note_answer(user_text, sequence)
+                if structured_controller._last_text:
+                    structured_controller.note_answer(user_text, sequence)
+                else:
+                    structured_controller.note_opening_answer(user_text, sequence, welcome)
 
             # Evidence coverage is judged independently from the moderator.
             # The call is batched across every unresolved/partial criterion.

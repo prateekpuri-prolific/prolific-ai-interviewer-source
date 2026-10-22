@@ -306,7 +306,7 @@ async def test_contextual_websocket_observes_sanitized_answers_and_finalizes(
         {"content": '[[TURN {"action":"close","question":null,"intent":null}]] Thank you.', "prompt_tokens": 1, "completion_tokens": 1},
     ])
     observer = AsyncMock(return_value=(policy.Observation(
-        updates=[], opportunities=[], ai_use="unknown", ai_use_quote="", boundaries=[]),
+        updates=[], opportunities=[], ai_use="unknown", ai_use_quote="", chatbot_use="unclear", chatbot_use_quote="", chatbot_use_sequence=None, boundaries=[]),
         {"prompt_tokens": 1, "completion_tokens": 1}))
     monkeypatch.setattr(api, "async_session_factory", db_session_factory)
     for name in ("register_session", "unregister_session", "publish_transcript_event"):
@@ -329,7 +329,11 @@ async def test_contextual_websocket_observes_sanitized_answers_and_finalizes(
     if not stop:
         context = observer.call_args.kwargs["payload"]
         assert context["actual_question"] == "Do you use AI day to day?"
-        assert len(context["conversation"]) == 1  # readiness is not research evidence
+        assert len(context["conversation"]) == 2
+        assert context["conversation"][0]["topic_id"] == "opening"
+        assert context["conversation"][1]["topic_id"] == "warmup"
+        # Opening context is visible, but is not automatically research evidence.
+        assert context["topic_states"]["questions"][0]["coverage_status"] == "missing"
         assert "synthetic.person@example.com" not in json.dumps(context)
     async with db_session_factory() as db:
         session = await db.scalar(select(Session).where(Session.agent_id == agent.id))

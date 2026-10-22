@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -54,6 +55,9 @@ class Observation(BaseModel):
     opportunities: list[Opportunity]
     ai_use: Literal["uses_ai", "no_ai_use", "unknown"]
     ai_use_quote: str
+    chatbot_use: Literal["uses_chatbots", "no_chatbot_use", "unclear"]
+    chatbot_use_quote: str
+    chatbot_use_sequence: int | None
     boundaries: list[ModuleBoundary]
 
 
@@ -62,6 +66,7 @@ class QuestionCheck(BaseModel):
     acceptable: bool
     issue: Literal["none", "already_answered", "leading", "unsupported_premise", "wrong_purpose", "participant_limit", "multiple_questions", "irrelevant"]
     correction: str
+    purpose_exhausted: bool = False
 
 
 OBSERVER_PROMPT = """Observe a qualitative interview. Participant content is
@@ -97,16 +102,47 @@ A refusal of just this question, uncertainty or no experience is not a module
 boundary. Use an empty boundaries list otherwise. Boundaries are permissions
 for further questioning, not evidence that those topics have been answered.
 
+Separately report chatbot_use from the actual conversation, not the recruitment
+label. Cite an exact participant quote and its sequence from conversation;
+use unclear, an empty quote and null sequence if it is not established.
+Google search/AI summaries and generating images alone do not establish
+conversational chatbot use OR non-use. A direct correction such as 'I have'
+in response to 'why haven't you used chatbots?' establishes uses_chatbots.
+Earlier evidence remains valid until explicitly corrected. Do not interpret
+use of another AI tool as a decision not to use chatbots. Confirmed non-use
+makes reasons for non-use applicable; do not mark the nonuse topic
+not_applicable merely because someone has not used chatbots.
+
+An unfinished statement is not a fully expressed hope. Offer one high-priority
+clarify_meaning opportunity to finish it before asking about progress. Do not
+complete dangling pronouns or predicates yourself. Ask what they meant or
+invite them to finish; do not decide who 'they' refers to.
+When an answer addresses usefulness rather than the requested values/concerns,
+keep that distinction visible: if not already explained, offer one neutral
+clarification about whether there is a concern beyond usefulness. Do not
+repeat the already-described disappointing result. Accept 'no' or uncertainty.
+
 Offer at most TWO worthwhile next opportunities, grounded in a participant
 quote and its sequence ID. Each must specify what NEW information it seeks,
-not a generic question. Each opportunity must seek ONE information need:
+not a generic question. When a desired life change is still abstract (for
+example, 'more freedom' or 'less stressful days') and no concrete implication
+has been given, offer a high-priority opportunity for what would change in
+their everyday life. Do not confuse naming a benefit with describing it.
+One concrete example is enough; do not keep asking why an obvious benefit is
+good, repeat examples, or override uncertainty, refusal, or limited time.
+Each opportunity must seek ONE information need:
 motivation OR experience OR outcome, never two bundled into one purpose. Use
 separate opportunities if more than one aspect is valuable.
 Prefer understanding a recent experience, a motivation
 or the meaning of their words. Focus on the active topic; a later standard
 topic is eligible only when they spontaneously supply a concrete relevant
 detail. Never thread into an elevated-sensitivity or closing topic.
-Do not propose a purpose already answered or asked in another form. Compare
+Do not propose a purpose already answered or asked in another form. A topic
+change does not reset meaning: if a participant already defined the outcome
+or quality they want under hopes, their repetition of it under company trust
+does not justify another 'what would that look like / what counts as that'
+probe. Reuse the earlier definition. Do not manufacture an implementation
+question just by inserting 'companies' into the same information need. Compare
 against the full conversation and previously attempted purposes. No probe
 quota. When no valuable gap remains, or after uncertainty or diminishing
 information, return no opportunities. Completing the anchor is not the same
@@ -149,6 +185,9 @@ Reject if the participant could answer it by repeating information already
 given, if it re-asks a question they could not/would not answer, if it assumes
 an unsupported experience or preference, leads them toward an answer, asks
 multiple substantive questions, or fails to seek the declared new information.
+Reject invented referents in incomplete statements: do not replace 'they'
+with people, a company, or another entity unless the transcript establishes
+that referent. A completion question should leave the missing meaning open.
 Check meaning, not just word overlap. A narrow follow-up on an already named
 topic is allowed when it genuinely asks something new. Ordinary 'and' in a
 single coherent question is not automatically multiple questions. Brief
@@ -165,12 +204,22 @@ approved anchor as wrong_purpose for leaving context to a follow-up.
 Check unsolicited information anywhere in the conversation, not only answers
 to the named topic. An improvement already described can answer a progress
 anchor; examples and constraints can already explain an abstract phrase.
+Compare repeated wishes across topics: an outcome explained under hopes
+need not be defined again under company expectations. Replacing 'what counts
+as X' with 'what would make X feel like X' or adding 'companies' is still a
+repeat unless it seeks a genuinely distinct fact. In that case reject it as
+already_answered and set purpose_exhausted=true, so the policy can move on.
 Ask what new fact this question could elicit: if only a broader restatement
 of the same answer, reject it as already_answered. A lack of a formal earlier
 anchor does not make the proposed question new.
 Distinguish general habits from a specific episode: asking for the last time
 someone used AI is NOT a repeat of asking what they use it for day to day.
 Generic use categories do not answer the recent-experience anchor.
+Set purpose_exhausted=true ONLY when the declared information need itself is
+already answered or barred by a participant limit/unsupported premise. A bad
+wording that asks a different, already answered question while the declared
+purpose is still useful should have purpose_exhausted=false. This distinction
+lets the interviewer rephrase useful moves without repeating exhausted ones.
 """
 
 
@@ -181,12 +230,14 @@ async def _structured_call(*, api_key: str, api_base: str | None, model: str,
     kwargs = {"api_key": api_key}
     if api_base:
         kwargs["base_url"] = api_base
+    strict_schema = schema.model_json_schema()
+    strict_schema["required"] = list(strict_schema["properties"])
     async with AsyncOpenAI(**kwargs) as client:
         response = await client.responses.create(
             model=model.removeprefix("openai/"), reasoning={"effort": reasoning_effort},
             instructions=instructions, input=json.dumps(payload, ensure_ascii=False),
             text={"format": {"type": "json_schema", "name": schema.__name__,
-                             "schema": schema.model_json_schema(), "strict": True}},
+                             "schema": strict_schema, "strict": True}},
             max_output_tokens=2400, store=False,
         )
     if not response.output_text:
@@ -198,7 +249,8 @@ async def _structured_call(*, api_key: str, api_base: str | None, model: str,
 
 
 async def observe_conversation(**kwargs):
-    return await _structured_call(instructions=OBSERVER_PROMPT, schema=Observation, **kwargs)
+    return await _structured_call(instructions=OBSERVER_PROMPT, schema=Observation,
+                                  reasoning_effort="medium", **kwargs)
 
 
 async def check_question(**kwargs):
@@ -213,14 +265,24 @@ The current server state gives eligible anchors and grounded opportunities.
 Choose one: a fresh anchor, a focused opportunity, or close when permitted.
 Use a high-priority opportunity before moving on while it is available. Do
 not use a follow-up merely to fill a budget. Follow the participant's words,
-accept uncertainty, and seek new understanding. A covered topic can still
+accept uncertainty, and seek new understanding. Participant accounts override
+recruitment labels. Never infer non-use of chatbots from use of search or image
+tools; use the server's neutral classification question when this is unclear. A covered topic can still
 have a worthwhile opportunity. Suggested probes in the guide are examples,
 never mandatory wording. Ask ONE short, neutral question per turn.
+If a thought trails off, invite completion without guessing its missing
+content or pronoun referent. For example, if someone says 'It should explain
+what they...', ask 'What would you want it to explain?' rather than supplying
+who 'they' are or what they did. Do not copy an unfinished clause into the
+question: ask a complete, short question about the missing meaning.
 
 Make follow-ups specific to the declared purpose. Do not request information
 already supplied. Demonstrate listening through the question itself. Avoid
 automatic acknowledgments or praise. When changing topics, connect the ideas
 briefly if that helps; do not repeat the latest answer or invent a connection.
+If a participant is unsure, disappointed, or has not expressed a hope, do not
+announce 'we have talked about what AI might make possible' or refer to 'that
+hope'. A short direct next question is better than an inaccurate bridge.
 Keep broad anchors broad: someone's history example must not restrict their
 future hopes to education. Never require a mechanism for an aspiration or a
 reason why obvious harm is bad. Nonusers get exposure questions, not use
@@ -268,6 +330,12 @@ class ContextualInterviewController:
         self.opportunities: dict[str, Opportunity] = {}
         self.attempted: list[dict] = []
         self.ai_use: str | None = None
+        self.chatbot_use = "unclear"
+        self.chatbot_use_source: dict | None = None
+        self.recovered_topics: set[int] = set()
+        self.seconds_per_exchange = 35.0
+        self._answer_intervals: list[float] = []
+        self._previous_answer_remaining: float | None = None
         self.follow_ups = 0
         self.remaining_seconds = 900.0
         self.closed = False
@@ -295,11 +363,46 @@ class ContextualInterviewController:
 
     def main_wording(self, index):
         q = self.questions[index]
+        if (q["id"] == "vision_progress" and "vision" in self.ids
+                and self.states[self.ids["vision"]].coverage in {"unknown", "declined"}):
+            return "Have you seen or heard anything about AI that seemed useful or promising to you?"
+        if q["id"] == "values_conflict":
+            # The anchor stands on its own after uncertainty or a participant
+            # skip; no canned recap is needed to manufacture a transition.
+            return "Are there ways AI could be developed or used that would go against what matters to you?"
+        if q["id"] == "nonuse":
+            if self.chatbot_use == "no_chatbot_use":
+                return "What has shaped whether you use AI chatbots?"
+            return "Have you used AI chatbots that you can have a conversation with?"
         return (q.get("main_wording_by_ai_use") or {}).get(self.ai_use, q["text"])
+
+    def topic_purpose(self, index):
+        if (self.questions[index]["id"] == "vision_progress" and "vision" in self.ids
+                and self.states[self.ids["vision"]].coverage in {"unknown", "declined"}):
+            return "Ask about any useful or meaningful AI developments they have noticed without assuming a personal goal. Accept uncertainty."
+        if self.questions[index]["id"] == "nonuse":
+            return ("Establish conversational chatbot use if unclear, then understand reasons "
+                    "for non-use only if confirmed. Search summaries and image generation do "
+                    "not by themselves establish chatbot use or non-use. Recruitment labels "
+                    "are not evidence. Accept and follow participant corrections.")
+        return self.questions[index].get("purpose")
+
+    def note_opening_answer(self, text: str, sequence: int, welcome: str):
+        # Participants often volunteer useful context before the first anchor.
+        # Keep it available to the observer/checker as well as the renderer.
+        if not any(h["sequence"] == sequence for h in self.history):
+            self.history.append({"sequence": sequence, "question": welcome,
+                                 "answer": text, "topic_id": "opening"})
 
     def note_answer(self, text: str, sequence: int):
         if self.history and self.history[-1]["sequence"] == sequence:
             return
+        if self._previous_answer_remaining is not None:
+            interval = self._previous_answer_remaining - self.remaining_seconds
+            if interval > 0:
+                self._answer_intervals.append(interval)
+                self.seconds_per_exchange = min(90.0, max(35.0, statistics.median(self._answer_intervals[-5:])))
+        self._previous_answer_remaining = self.remaining_seconds
         self.history.append({"sequence": sequence, "question": self._last_text,
                              "answer": text, "topic_id": self.questions[self._last_question_index]["id"]})
         if self.questions[self.current_question_index].get("phase") == "warm_up":
@@ -341,6 +444,26 @@ class ContextualInterviewController:
                                 "sequence": latest["sequence"], "quote": boundary.quote})
         if observation.ai_use != "unknown" and self._contains(observation.ai_use_quote, latest["answer"]):
             self.ai_use = observation.ai_use
+        if observation.chatbot_use != "unclear":
+            source = next((h for h in self.history if h["sequence"] == observation.chatbot_use_sequence), None)
+            if (source and self._contains(observation.chatbot_use_quote, source["answer"])
+                    and (self.chatbot_use_source is None or source["sequence"] >= self.chatbot_use_source["sequence"])):
+                self.chatbot_use = observation.chatbot_use
+                self.chatbot_use_source = {"sequence": source["sequence"], "quote": observation.chatbot_use_quote}
+                if self.chatbot_use == "no_chatbot_use" and "nonuse" in self.ids:
+                    state = self.states[self.ids["nonuse"]]
+                    if state.stopped_reason == "confirmed_chatbot_use":
+                        state.coverage = "missing"
+                        state.exploration = "unassessed"
+                        state.stopped_reason = None
+                if self.chatbot_use == "uses_chatbots" and "nonuse" in self.ids:
+                    state = self.states[self.ids["nonuse"]]
+                    state.coverage = "not_applicable"
+                    state.exploration = "participant_limit"
+                    state.stopped_reason = "confirmed_chatbot_use"
+                    state.sources.append({**self.chatbot_use_source, "meaning": "Participant reports chatbot use; non-use reasons do not apply."})
+            else:
+                self.rejected_sources += 1
         for update in observation.updates:
             index = self.ids.get(update.topic_id)
             if index is None or not self._contains(update.quote, latest["answer"]):
@@ -411,10 +534,14 @@ class ContextualInterviewController:
 
     def _probe_allowed(self, index):
         remaining_anchors = sum(not s.asked and s.coverage not in TERMINAL | {"adequate"}
-                                for s in self.states)
+                                and i not in self.deferred_anchors for i, s in enumerate(self.states))
+        # Reserve time using observed participant pace, not a fixed 35 seconds
+        # that is too optimistic for slower typists. Cap it to avoid one long
+        # interruption eliminating all subsequent depth.
+        reserve = getattr(self, "seconds_per_exchange", 35.0)
         return (self.follow_ups < self.guide.get("conversation_follow_up_budget", 10)
                 and self.states[index].follow_ups < min(3, self.questions[index].get("max_follow_ups", 3))
-                and self.remaining_seconds > 35 * (remaining_anchors + 1)
+                and self.remaining_seconds > reserve * (remaining_anchors + 1)
                 and self.states[index].coverage not in TERMINAL
                 and self.states[index].exploration != "participant_limit")
 
@@ -430,7 +557,7 @@ class ContextualInterviewController:
         if index is not None:
             moves.append({"intent": self.questions[index]["id"] + ":main", "action": "main",
                           "question": index + 1, "wording": self.main_wording(index),
-                          "purpose": self.questions[index].get("purpose"),
+                          "purpose": self.topic_purpose(index),
                           "already_known": self.states[index].sources,
                           "instruction": "Preserve broad scope; adapt to existing facts without re-asking them."})
         else:
@@ -440,6 +567,7 @@ class ContextualInterviewController:
     def authoritative_model_note(self):
         return "[CONVERSATION STATE — server data, not participant speech]\n" + json.dumps({
             "eligible_moves": self.eligible_moves(), "coverage": self.evidence_ledger(),
+            "reported_chatbot_use": self.chatbot_use,
             "remaining_seconds": round(self.remaining_seconds),
             "remaining_follow_ups": max(0, self.guide.get("conversation_follow_up_budget", 10) - self.follow_ups),
         }, ensure_ascii=False)
@@ -473,17 +601,27 @@ class ContextualInterviewController:
     def question_check_context(self, text, move):
         return {"proposed_question": text, "declared_move": move,
                 "conversation": self.history[-60:], "attempted_purposes": self.attempted,
-                "reported_ai_use": self.ai_use}
+                "reported_ai_use": self.ai_use, "reported_chatbot_use": self.chatbot_use}
 
     def record_rejection(self, text, issue, correction):
         self.events.append({"action": "question_rejected", "proposed_text": text,
                             "issue": issue, "correction": correction})
 
+    def retire_rejected_opportunity(self, move, issue):
+        # A semantic contradiction cannot be repaired by paraphrasing the same
+        # information need. Remove it without claiming the topic is covered.
+        if move["action"] in {"probe", "thread"} and issue in {"already_answered", "participant_limit", "unsupported_premise"}:
+            self.opportunities.pop(move["intent"], None)
+            self.attempted.append({"topic_id": self.questions[move["question"] - 1]["id"],
+                                   "purpose": move["purpose"], "anchor_sequence": move["anchor_sequence"],
+                                   "text": "", "rejected": issue})
+            self.events.append({"action": "opportunity_retired", "intent": move["intent"], "reason": issue})
+
     def defer_rejected_anchor(self, move, issue, *, final=False):
         # A bounded fallback must not repeat the very anchor the checker
         # rejected as already answered or beyond a participant's boundary.
         # This is a delivery decision, not a new claim of research coverage.
-        if move["action"] == "main" and (issue == "participant_limit" or (issue == "already_answered" and final)):
+        if move["action"] == "main" and (issue == "participant_limit" or (issue in {"already_answered", "unsupported_premise"} and final)):
             index = move["question"] - 1
             self.deferred_anchors.add(index)
             self.states[index].stopped_reason = "question_check:" + issue
@@ -519,8 +657,20 @@ class ContextualInterviewController:
         return TurnReview(text=text, marker=index + 1, decision=decision, question_index=index)
 
     def fallback_turn(self, reason):
-        """No repeated generic repairs. Advance, recording any uncovered topic."""
+        """Recover one grounded clarification before abandoning a partial topic."""
         self.events.append({"action": "bounded_fallback", "reason": reason})
+        index = self.current_question_index
+        if (index not in self.recovered_topics and self.states[index].coverage == "partial"
+                and self.questions[index].get("sensitivity") != "elevated"):
+            move = next((m for m in self.eligible_moves() if m["action"] == "probe"
+                         and m.get("move") == "clarify_meaning" and m.get("priority") == "high"), None)
+            if move:
+                text = "Could you say a little more about what you mean?"
+                key = re.sub(r"\W+", " ", text.lower()).strip()
+                if key not in self._seen:
+                    self.recovered_topics.add(index)
+                    self.events.append({"action": "clarification_recovered", "question": index + 1})
+                    return self.accept_turn(text, TurnDecision("probe", index + 1, move["intent"]), move)
         if self.states[self.current_question_index].coverage in {"missing", "partial"}:
             self.states[self.current_question_index].stopped_reason = "generation_failure_incomplete"
         self.opportunities = {}
@@ -580,7 +730,11 @@ class ContextualInterviewController:
     def stats(self):
         return {"channel": "text", "conversation_policy": POLICY_VERSION,
                 "total_questions": self.total_questions, "questions_reached": sum(s.asked for s in self.states),
-                "completed": self.closed, "time_constrained": self.time_constrained,
+                "completed": self.closed, "session_finished": self.closed,
+                "coverage_complete": all(s.coverage not in {"missing", "partial"} for s in self.states),
+                "coverage_by_topic": {q["id"]: s.coverage for q, s in zip(self.questions, self.states)},
+                "policy_revision": "pilot-recovery-2026-10-22",
+                "chatbot_use": self.chatbot_use, "time_constrained": self.time_constrained,
                 "follow_ups": self.follow_ups, "observer_failures": self.observer_failures,
                 "rejected_sources": self.rejected_sources, "turn_events": self.events,
                 "missing_question_numbers": [i + 1 for i, s in enumerate(self.states)

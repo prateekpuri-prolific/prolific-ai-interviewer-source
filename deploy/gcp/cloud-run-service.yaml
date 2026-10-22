@@ -83,6 +83,9 @@ spec:
                   name: oasis-openai-api-key
             - name: OPENAI_USE_EU
               value: "false"
+            # Only studies with an owned, enabled lifecycle policy are eligible.
+            - name: PRIVACY_RETENTION_ENABLED
+              value: "true"
             - name: AUTH_ENABLED
               value: "true"
             - name: AUTH_USERNAME

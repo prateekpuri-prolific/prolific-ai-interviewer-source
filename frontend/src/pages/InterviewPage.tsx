@@ -1500,7 +1500,21 @@ export default function InterviewPage() {
           </div>
         )}
 
-        {/* ── Structured progress bar ────────────────────────── */}
+        {participantInfo && config?.research_stage === "pilot" &&
+          config.research_protocol_version?.startsWith("anthropic-voices-") &&
+          (status === "idle" || status === "input") && (
+            <section className="mb-6 w-full rounded-2xl border border-gray-200 bg-white p-6 shadow-sm animate-slide-up sm:p-7" aria-labelledby="research-team-note-heading">
+              <h2 id="research-team-note-heading" className="text-lg font-semibold text-gray-900">A note from the research team</h2>
+              <div className="mt-3 space-y-3 text-sm leading-relaxed text-gray-700">
+                <p>We care deeply about understanding your experiences and views of AI. Arranging a conversation between a researcher and a participant can be surprisingly difficult, especially when research spans time zones, languages, and busy personal schedules.</p>
+                <p>We’re building an automated interviewing platform to make it easier for more people to take part, in their own time, and to bring a wider range of voices into our research. Your perspective matters, whether you use AI often, rarely, or not at all.</p>
+                <p>This is an early pilot, so some questions may feel awkward or you may run into technical hiccups. We appreciate your time and your honest feedback about what works and what doesn’t. You can skip any question or stop at any time.</p>
+                <p className="font-medium text-gray-900">Thank you for sharing your perspective and helping us make this a better experience for the people who take part after you.</p>
+              </div>
+            </section>
+          )}
+
+        {/* ── Study information and consent ──────────────────── */}
         {participantInfo && (status === "idle" || status === "input") && (
           <section className="mb-8 w-full rounded-2xl border border-gray-200 bg-white p-6 shadow-sm animate-slide-up sm:p-7" aria-labelledby="study-information-heading">
             <div className="flex items-center justify-between gap-3 mb-3">

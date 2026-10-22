@@ -31,7 +31,7 @@ def observation(c, *, coverage="adequate", purpose="Why they chose AI to learn h
                              meaning="They used AI to learn history.", exploration="useful" if opportunities else "settled", correction=False)],
         opportunities=[Opportunity(topic_id=h["topic_id"], move="motivation", purpose=purpose,
                                    anchor_sequence=h["sequence"], anchor_quote=h["answer"], priority=priority)] if opportunities else [],
-        ai_use="unknown", ai_use_quote="", boundaries=[],
+        ai_use="unknown", ai_use_quote="", chatbot_use="unclear", chatbot_use_quote="", chatbot_use_sequence=None, boundaries=[],
     )
 
 
@@ -354,3 +354,174 @@ def test_repetition_rejection_allows_anchor_rewording_before_final_fallback():
     assert move in c.eligible_moves()
     c.defer_rejected_anchor(move, 'already_answered', final=True)
     assert move not in c.eligible_moves()
+
+
+def nonuse_controller():
+    guide = json.loads((Path(__file__).parents[1] / "studies/anthropic_voices_v01/ai_nonusers.json").read_text())["agent"]["interview_guide"]
+    return ContextualInterviewController(guide)
+
+
+def test_other_ai_use_cannot_create_chatbot_nonuse_premise():
+    c = nonuse_controller()
+    c.ai_use = "uses_ai"
+    wording = c.main_wording(c.ids["nonuse"])
+    assert wording == "Have you used AI chatbots that you can have a conversation with?"
+    assert "not" not in wording
+
+
+def test_confirmed_chatbot_use_removes_future_nonuse_module_with_evidence():
+    c = nonuse_controller()
+    c._last_text = "Have you used conversational AI?"
+    c.note_answer("Yes, I use a chatbot.", 4)
+    obs = observation(c, opportunities=False)
+    obs.chatbot_use = "uses_chatbots"
+    obs.chatbot_use_quote = "I use a chatbot"
+    obs.chatbot_use_sequence = 4
+    c.apply_observation(obs)
+    state = c.states[c.ids['nonuse']]
+    assert state.coverage == 'not_applicable'
+    assert state.sources[0]['sequence'] == 4
+    c.current_question_index = c.ids['nonuse'] - 1
+    c.states[c.current_question_index].asked = True
+    assert c.eligible_moves()[-1]['intent'] == 'close:main'
+
+
+def test_fabricated_chatbot_use_evidence_cannot_skip_module():
+    c = nonuse_controller()
+    c.note_answer("I make pictures with AI.", 4)
+    obs = observation(c, opportunities=False)
+    obs.chatbot_use = 'uses_chatbots'
+    obs.chatbot_use_quote = 'I use chatbots'
+    obs.chatbot_use_sequence = 4
+    c.apply_observation(obs)
+    assert c.chatbot_use == 'unclear'
+    assert c.states[c.ids['nonuse']].coverage == 'missing'
+
+
+def test_partial_thought_survives_renderer_failure_once():
+    c = controller(topic='vision', answer='I wish AI would tell us when it is')
+    obs = observation(c, coverage='partial', purpose='Clarify the unfinished thought')
+    obs.opportunities[0].move = 'clarify_meaning'
+    c.apply_observation(obs)
+    review = c.fallback_turn('invalid output twice')
+    assert review.decision.action == 'probe'
+    assert review.question_index == c.ids['vision']
+    assert c.states[c.ids['vision']].coverage == 'partial'
+    assert c.follow_ups == 1
+    assert c.fallback_turn('failed again').decision.intent == 'vision_progress:main'
+
+
+def test_exhausted_opportunity_does_not_reappear_in_fallback():
+    c = controller(topic='vision', answer='I already explained what I meant.')
+    obs = observation(c, coverage='partial')
+    obs.opportunities[0].move = 'clarify_meaning'
+    c.apply_observation(obs)
+    move, _ = probe_move(c)
+    c.retire_rejected_opportunity(move, 'already_answered')
+    assert c.fallback_turn('checker rejected purpose').decision.intent == 'vision_progress:main'
+    assert c.states[c.ids['vision']].coverage == 'partial'
+
+
+def test_finished_session_does_not_claim_complete_coverage():
+    c = controller()
+    c.close_for_time()
+    stats = c.stats()
+    assert stats['session_finished']
+    assert not stats['coverage_complete']
+    assert stats['coverage_by_topic']['recent_encounter'] == 'missing'
+
+
+def test_slow_answers_reserve_time_for_remaining_anchors():
+    c = controller()
+    c.remaining_seconds = 800
+    c.note_answer('First detail', 8)
+    c.remaining_seconds = 720
+    c.note_answer('Second detail', 10)
+    c.remaining_seconds = 640
+    c.note_answer('Third detail', 12)
+    assert c.seconds_per_exchange == 80
+    c.remaining_seconds = 350
+    assert not c._probe_allowed(c.ids['recent_encounter'])
+
+
+@pytest.mark.asyncio
+async def test_missing_marker_repair_keeps_selected_clarification(monkeypatch):
+    import app.api.text_chat as api
+    import app.pipeline.conversation_policy as policy
+    c = controller(topic='vision', answer='I wish AI would tell us when it is')
+    obs = observation(c, coverage='partial', purpose='Clarify what they want disclosed')
+    obs.opportunities[0].move = 'clarify_meaning'
+    c.apply_observation(obs)
+    move, decision = probe_move(c)
+    raw = '[[TURN ' + json.dumps({'action': 'probe', 'question': decision.question, 'intent': decision.intent}) + ']] What should it disclose, and what would that change?'
+    monkeypatch.setattr(api, '_call_llm', AsyncMock(side_effect=[
+        {'content': raw, 'prompt_tokens': 1, 'completion_tokens': 1},
+        {'content': 'What would you want it to disclose?', 'prompt_tokens': 1, 'completion_tokens': 1},
+    ]))
+    monkeypatch.setattr(api, '_get_key', AsyncMock(return_value='test'))
+    monkeypatch.setattr(api, '_openai_api_base', AsyncMock(return_value=None))
+    checker = AsyncMock(return_value=(QuestionCheck(acceptable=True, issue='none', correction=''), {'prompt_tokens': 1, 'completion_tokens': 1}))
+    monkeypatch.setattr(policy, 'check_question', checker)
+    _, review = await api._contextual_agent_turn(c, [], model='test', study_id=None, participant_text=c.history[-1]['answer'])
+    assert review.text == 'What would you want it to disclose?'
+    assert review.question_index == c.ids['vision']
+    assert checker.await_count == 1
+    assert any(e['action'] == 'repair_marker_recovered' for e in c.events)
+
+
+@pytest.mark.asyncio
+async def test_retired_move_cannot_be_resurrected_by_marker_recovery(monkeypatch):
+    import app.api.text_chat as api
+    import app.pipeline.conversation_policy as policy
+    c = controller()
+    c.apply_observation(observation(c))
+    move, decision = probe_move(c)
+    raw = '[[TURN ' + json.dumps({'action': 'probe', 'question': decision.question, 'intent': decision.intent}) + ']] Why did you choose AI?'
+    monkeypatch.setattr(api, '_call_llm', AsyncMock(side_effect=[
+        {'content': raw, 'prompt_tokens': 1, 'completion_tokens': 1},
+        {'content': 'What made you choose it?', 'prompt_tokens': 1, 'completion_tokens': 1},
+    ]))
+    monkeypatch.setattr(api, '_get_key', AsyncMock(return_value='test'))
+    monkeypatch.setattr(api, '_openai_api_base', AsyncMock(return_value=None))
+    monkeypatch.setattr(policy, 'check_question', AsyncMock(return_value=(
+        QuestionCheck(acceptable=False, issue='already_answered', correction='Motivation was already explained.', purpose_exhausted=True),
+        {'prompt_tokens': 1, 'completion_tokens': 1})))
+    _, review = await api._contextual_agent_turn(c, [], model='test', study_id=None, participant_text=c.history[-1]['answer'])
+    assert review.decision.intent == 'vision:main'
+    assert c.follow_ups == 0
+
+
+def test_opening_context_is_preserved_without_pretending_anchor_was_answered():
+    c = nonuse_controller()
+    c.note_opening_answer('I have only tried AI in research studies.', 2, 'Ready to start?')
+    assert not c.needs_evidence_judge
+    assert not any(s.asked for s in c.states)
+    c._last_text = c.main_wording(0)
+    c.note_answer('Not in everyday life.', 4)
+    assert c.observer_context()['conversation'][0]['answer'] == 'I have only tried AI in research studies.'
+    assert c.question_check_context('Do you use AI?', {})['conversation'][0]['sequence'] == 2
+
+
+def test_uncertain_vision_has_progress_wording_without_a_presumed_goal():
+    c = controller(topic='vision', answer='I am unsure.')
+    c.apply_observation(observation(c, coverage='unknown', opportunities=False))
+    move = c.eligible_moves()[-1]
+    assert move['intent'] == 'vision_progress:main'
+    assert 'hope' not in move['wording']
+    assert 'without assuming' in move['purpose']
+
+
+def test_later_chatbot_correction_can_reopen_nonuse_without_stale_overwrite():
+    c = nonuse_controller()
+    c.note_answer('I use a chatbot.', 4)
+    obs = observation(c, opportunities=False)
+    obs.chatbot_use = 'uses_chatbots'; obs.chatbot_use_quote = 'I use a chatbot'; obs.chatbot_use_sequence = 4
+    c.apply_observation(obs)
+    c.note_answer('Actually I meant ordinary search, not a chatbot.', 6)
+    correction = observation(c, opportunities=False)
+    correction.chatbot_use = 'no_chatbot_use'; correction.chatbot_use_quote = c.history[-1]['answer']; correction.chatbot_use_sequence = 6
+    c.apply_observation(correction)
+    assert c.states[c.ids['nonuse']].coverage == 'missing'
+    c.apply_observation(obs)
+    assert c.chatbot_use == 'no_chatbot_use'
+    assert c.states[c.ids['nonuse']].coverage == 'missing'
