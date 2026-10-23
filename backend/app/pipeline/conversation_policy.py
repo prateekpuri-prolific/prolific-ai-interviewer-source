@@ -161,6 +161,12 @@ Prefer understanding a recent experience, a motivation
 or the meaning of their words. Focus on the active topic; a later standard
 topic is eligible only when they spontaneously supply a concrete relevant
 detail. Never thread into an elevated-sensitivity or closing topic.
+When the ACTIVE topic is closing and its max_follow_ups is positive, a new
+substantive point in the answer may receive ONE focused follow-up under that
+closing topic's own id. Seek the missing meaning or a useful concrete detail;
+do not reopen earlier topics. A bare new label such as 'data centers' deserves
+one clarification. A new example may merit one detail, but a complete account,
+'nothing else', uncertainty or a wish to finish should close without probing.
 Do not propose a purpose already answered or asked in another form. A topic
 change does not reset meaning: if a participant already defined the outcome
 or quality they want under hopes, their repetition of it under company trust
@@ -252,6 +258,11 @@ the participant's existing words, independently of the declared purpose.
 If a complete answer is already present, copy that exact contiguous participant
 quote into answer_reuse_quote and reject the question. Otherwise return an
 empty string. Shared topic words or a partial answer are NOT sufficient.
+For a company-action question, an earlier concern or wish does not necessarily
+specify what companies should DO. If only part is answered, preserve the topic
+and suggest a narrower question for the remaining information. Return a reuse
+quote only when you also judge the proposed question already_answered; do not
+supply a speculative answer while marking a question acceptable.
 For example, if a participant has said a proposed facility should teach a
 skill, asking what the facility should help people do is already answered,
 even if some other clause in their answer remains ambiguous. A narrower
@@ -307,7 +318,7 @@ async def check_question(**kwargs):
     check, usage = await _structured_call(instructions=QUESTION_CHECK_PROMPT, schema=QuestionCheck,
                                          reasoning_effort="medium", **kwargs)
     quote = " ".join(check.answer_reuse_quote.split())
-    if quote and any(quote in " ".join(h.get("answer", "").split())
+    if check.issue == "already_answered" and quote and any(quote in " ".join(h.get("answer", "").split())
                      for h in kwargs["payload"].get("conversation", [])):
         check = check.model_copy(update={
             "acceptable": False, "issue": "already_answered",
@@ -585,7 +596,10 @@ class ContextualInterviewController:
                     or self.states[index].exploration == "participant_limit"):
                 continue
             q = self.questions[index]
-            if q.get("phase") in {"warm_up", "closing"}:
+            if q.get("phase") == "warm_up":
+                continue
+            if q.get("phase") == "closing" and (index != self.current_question_index
+                                                    or self.time_constrained):
                 continue
             if any(not self.states[self.ids[dep]].asked for dep in q.get("depends_on", [])):
                 continue
@@ -621,13 +635,15 @@ class ContextualInterviewController:
 
     def _probe_allowed(self, index):
         remaining_anchors = sum(not s.asked and s.coverage not in TERMINAL | {"adequate"}
+                                and i > self.current_question_index
                                 and i not in self.deferred_anchors for i, s in enumerate(self.states))
         # Reserve time using observed participant pace, not a fixed 35 seconds
         # that is too optimistic for slower typists. Cap it to avoid one long
         # interruption eliminating all subsequent depth.
         reserve = getattr(self, "seconds_per_exchange", 35.0)
         return (self.follow_ups < self.guide.get("conversation_follow_up_budget", 10)
-                and self.states[index].follow_ups < min(3, self.questions[index].get("max_follow_ups", 3))
+                and self.states[index].follow_ups < min(1 if self.questions[index].get("phase") == "closing" else 3,
+                                                     self.questions[index].get("max_follow_ups", 3))
                 and self.remaining_seconds > reserve * (remaining_anchors + 1)
                 and self.states[index].coverage not in TERMINAL
                 and self.states[index].exploration != "participant_limit")
@@ -716,12 +732,31 @@ class ContextualInterviewController:
                                    "text": "", "rejected": issue})
             self.events.append({"action": "opportunity_retired", "intent": move["intent"], "reason": issue})
 
-    def defer_rejected_anchor(self, move, issue, *, final=False):
+    def defer_rejected_anchor(self, move, issue, *, final=False, check=None):
         # A bounded fallback must not repeat the very anchor the checker
         # rejected as already answered or beyond a participant's boundary.
-        # This is a delivery decision, not a new claim of research coverage.
-        if move["action"] == "main" and (issue == "participant_limit" or (issue in {"already_answered", "unsupported_premise"} and final)):
-            index = move["question"] - 1
+        # A reuse skip also records the checker's grounded coverage evidence.
+        if move["action"] != "main":
+            return
+        index = move["question"] - 1
+        if issue == "already_answered" and final:
+            # Retire the whole topic only with evidence that its purpose, not
+            # merely this wording, is answered. Reconcile the two judges.
+            source = next((h for h in self.history if check is not None
+                           and self._contains(check.answer_reuse_quote, h["answer"])), None)
+            if check is None or not check.purpose_exhausted or source is None:
+                self.events.append({"action": "anchor_preserved", "question": index + 1,
+                                    "reason": "no_grounded_complete_answer"})
+                return
+            state = self.states[index]
+            if state.coverage not in TERMINAL:
+                state.coverage = "adequate"
+                state.exploration = "settled"
+                state.sources.append({"sequence": source["sequence"],
+                                      "quote": check.answer_reuse_quote,
+                                      "meaning": "Existing answer satisfies this topic's purpose.",
+                                      "source": "question_check"})
+        if issue == "participant_limit" or (issue in {"already_answered", "unsupported_premise"} and final):
             self.deferred_anchors.add(index)
             self.states[index].stopped_reason = "question_check:" + issue
 
@@ -786,6 +821,13 @@ class ContextualInterviewController:
                 state.stopped_reason = "generation_failure_incomplete"
                 continue  # Sensitive anchors require a successful contextual check.
             if state.coverage == "partial":
+                # Knowing that someone does not use chatbots does not answer
+                # WHY. This approved neutral anchor is still safe to recover.
+                if (question["id"] == "nonuse" and not state.asked
+                        and self.chatbot_use in {"no_chatbot_use", "research_only"}):
+                    text = self.main_wording(candidate)
+                    decision = TurnDecision("main", candidate + 1, question["id"] + ":main")
+                    return self.accept_turn(text, decision, {"purpose": self.topic_purpose(candidate)})
                 state.stopped_reason = "generation_failure_incomplete"
                 continue
             if (state.coverage in TERMINAL | {"adequate"} and not question.get("always_ask")
@@ -832,7 +874,7 @@ class ContextualInterviewController:
                 "completed": self.closed, "session_finished": self.closed,
                 "coverage_complete": all(s.coverage not in {"missing", "partial"} for s in self.states),
                 "coverage_by_topic": {q["id"]: s.coverage for q, s in zip(self.questions, self.states)},
-                "policy_revision": "pilot-depth-and-use-context",
+                "policy_revision": "pilot-closing-and-evidence-recovery",
                 "chatbot_use": self.chatbot_use, "chatbot_use_source": self.chatbot_use_source,
                 "time_constrained": self.time_constrained,
                 "follow_ups": self.follow_ups, "observer_failures": self.observer_failures,

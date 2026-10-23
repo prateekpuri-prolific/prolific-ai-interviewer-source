@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends
 
 from app.auth import require_auth
 from app.api.auth import router as auth_router
+from app.api.chatbot_screening import router as screening_router
 from app.api.studies import router as studies_router
 from app.api.agents import router as agents_router
 from app.api.sessions import router as sessions_router
@@ -24,6 +25,7 @@ api_router = APIRouter(prefix="/api")
 
 # Public routes (no auth required)
 api_router.include_router(auth_router)
+api_router.include_router(screening_router)
 
 # Protected routes (auth required when AUTH_ENABLED=true)
 api_router.include_router(studies_router, dependencies=[Depends(require_auth)])

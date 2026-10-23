@@ -398,7 +398,7 @@
           "main_wording_by_ai_use": {},
           "probe_wording_by_ai_use": {},
           "probes": [],
-          "max_follow_ups": 0,
+          "max_follow_ups": 1,
           "id": "close",
           "module": "Close",
           "purpose": "An additional participant-defined hope, worry, or explicit absence of one.",
@@ -407,7 +407,9 @@
             "An additional participant-defined hope, worry, or explicit absence of one."
           ],
           "evidence_probes": {},
-          "exploration_focus": [],
+          "exploration_focus": [
+            "One clarification or useful detail about a new point volunteered at closing; accept nothing else or uncertainty."
+          ],
           "do_not_assume": [
             "The participant has a further hope or worry."
           ],

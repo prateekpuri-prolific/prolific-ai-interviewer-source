@@ -149,6 +149,8 @@ def guide(arm: dict) -> dict:
         question["do_not_assume"] = arm["cautions"]
         questions.append(question)
     close = card("close", "Close", "Looking ahead, is there a hope or worry about AI that we have not yet discussed?", "An additional participant-defined hope, worry, or explicit absence of one.", phase="closing")
+    close["max_follow_ups"] = 1
+    close["exploration_focus"] = ["One clarification or useful detail about a new point volunteered at closing; accept nothing else or uncertainty."]
     close["do_not_assume"] = ["The participant has a further hope or worry."]
     questions.append(close)
     focuses = {
@@ -159,7 +161,7 @@ def guide(arm: dict) -> dict:
         "company_trust": ["A concrete company action", "How they would recognize that action"],
     }
     for question in questions:
-        question["exploration_focus"] = focuses.get(question["id"], [])
+        question["exploration_focus"] = focuses.get(question["id"], question.get("exploration_focus", []))
         # Evidence mappings remain useful for older policies but do not script this one.
         question["evidence_probes"] = {}
         if question["id"] in {"recent_encounter", "vision"}:

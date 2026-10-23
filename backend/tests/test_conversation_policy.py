@@ -258,17 +258,18 @@ def test_schema_requires_exploratory_policy_and_unique_stable_ids():
 async def test_failed_repair_cannot_deliver_an_anchor_rejected_as_out_of_bounds(monkeypatch, issue):
     import app.api.text_chat as api
     import app.pipeline.conversation_policy as policy
-    c = controller(topic='vision', answer='I would rather not talk about my hopes further.')
+    c = controller(topic='vision', answer='I would rather not talk about my hopes further.' if issue == 'participant_limit' else 'I have seen AI help people communicate across languages.')
     bad = '[[TURN {"action":"main","question":4,"intent":"vision_progress:main"}]] Have you seen progress toward that hope?'
     monkeypatch.setattr(api, '_call_llm', AsyncMock(return_value={'content': bad, 'prompt_tokens': 1, 'completion_tokens': 1}))
     monkeypatch.setattr(api, '_get_key', AsyncMock(return_value='test'))
     monkeypatch.setattr(api, '_openai_api_base', AsyncMock(return_value=None))
     monkeypatch.setattr(policy, 'check_question', AsyncMock(return_value=(
-        QuestionCheck(acceptable=False, issue=issue, correction='This anchor is out of bounds.'),
+        QuestionCheck(acceptable=False, issue=issue, correction='This anchor is out of bounds.',
+                          purpose_exhausted=True, answer_reuse_quote=c.history[-1]['answer'] if issue == 'already_answered' else ''),
         {'prompt_tokens': 1, 'completion_tokens': 1})))
     _, review = await api._contextual_agent_turn(c, [], model='test', study_id=None, participant_text=c.history[-1]['answer'])
     assert review.decision.intent == 'values_conflict:main'
-    assert c.states[3].coverage == 'missing'
+    assert c.states[3].coverage == ('adequate' if issue == 'already_answered' else 'missing')
     assert c.states[3].stopped_reason == 'question_check:' + issue
 
 
@@ -353,7 +354,13 @@ def test_repetition_rejection_allows_anchor_rewording_before_final_fallback():
     c.defer_rejected_anchor(move, 'already_answered')
     assert move in c.eligible_moves()
     c.defer_rejected_anchor(move, 'already_answered', final=True)
+    assert move in c.eligible_moves()
+    check = QuestionCheck(acceptable=False, issue='already_answered', correction='',
+                          purpose_exhausted=True, answer_reuse_quote=c.history[-1]['answer'])
+    c.defer_rejected_anchor(move, 'already_answered', final=True, check=check)
     assert move not in c.eligible_moves()
+    assert c.states[move['question'] - 1].coverage == 'adequate'
+    assert c.states[move['question'] - 1].sources[-1]['quote'] == c.history[-1]['answer']
 
 
 def nonuse_controller():
@@ -633,11 +640,64 @@ def test_recent_experience_thread_can_continue_without_nested_topic_jump():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('quote,accepted', [('learn how to repair bicycles', False), ('invented participant answer', True)])
-async def test_checker_reuse_evidence_is_grounded_and_overrides_inconsistent_verdict(monkeypatch, quote, accepted):
+@pytest.mark.parametrize('quote,accepted', [('learn how to repair bicycles', True), ('invented participant answer', True)])
+async def test_speculative_reuse_quote_does_not_override_acceptable_verdict(monkeypatch, quote, accepted):
     import app.pipeline.conversation_policy as policy
     result = QuestionCheck(acceptable=True, issue='none', correction='', answer_reuse_quote=quote)
     monkeypatch.setattr(policy, '_structured_call', AsyncMock(return_value=(result, {})))
     check, _ = await policy.check_question(payload={'conversation': [{'answer': 'It should help people learn how to repair bicycles.'}]})
     assert check.acceptable is accepted
     if not accepted: assert check.issue == 'already_answered'
+
+
+@pytest.mark.parametrize("answer", ["Data centres.", "I worry about realistic deepfakes."])
+def test_new_point_at_closing_can_receive_one_grounded_followup(answer):
+    c = controller(topic="close", answer=answer)
+    c.remaining_seconds = 120
+    c.apply_observation(observation(c, coverage="partial", purpose="Understand this new concern"))
+    move, decision = probe_move(c)
+    c.accept_turn("What concerns you about that?", decision, move)
+    c.note_answer("The amount of water used for cooling.", 8)
+    c.apply_observation(observation(c, purpose="Explore more details"))
+    assert [m["action"] for m in c.eligible_moves()] == ["close"]
+
+
+@pytest.mark.parametrize("limit", ["unknown", "declined", "time", "budget", "nothing_else"])
+def test_closing_followup_respects_limits(limit):
+    c = controller(topic="close", answer="Nothing else." if limit == "nothing_else" else "Data centres.")
+    if limit == "time": c.remaining_seconds = 10
+    if limit == "budget": c.follow_ups = 10
+    c.apply_observation(observation(c, coverage=limit if limit in {"unknown", "declined"} else "adequate",
+                                    opportunities=limit != "nothing_else"))
+    assert [m["action"] for m in c.eligible_moves()] == ["close"]
+
+
+def test_no_thread_into_closing_before_its_anchor():
+    c = controller()
+    obs = observation(c)
+    obs.opportunities[0].topic_id = "close"
+    c.states[c.ids["close"]].coverage = "partial"
+    c.apply_observation(obs)
+    assert not c.opportunities
+
+
+def test_partial_nonuse_reason_survives_generation_failure():
+    c = nonuse_controller()
+    idx = c.ids['company_trust']
+    c.current_question_index = c._last_question_index = idx
+    for state in c.states[:idx + 1]: state.asked = True
+    c.chatbot_use = 'no_chatbot_use'
+    c.states[c.ids['nonuse']].coverage = 'partial'
+    review = c.fallback_turn('generation failed')
+    assert review.decision.intent == 'nonuse:main'
+    assert 'shaped whether' in review.text
+
+
+def test_partial_answer_does_not_retire_whole_main_topic():
+    c = controller(topic='values_conflict', answer='AI companies should be careful.')
+    move = next(m for m in c.eligible_moves() if m['action'] == 'main')
+    check = QuestionCheck(acceptable=False, issue='already_answered', correction='Seek the specific action.',
+                          purpose_exhausted=False, answer_reuse_quote=c.history[-1]['answer'])
+    c.defer_rejected_anchor(move, 'already_answered', final=True, check=check)
+    assert move in c.eligible_moves()
+    assert c.states[move['question'] - 1].coverage == 'missing'

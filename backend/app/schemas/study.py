@@ -112,6 +112,13 @@ class ResearchFielding(BaseModel):
         return cleaned
 
 
+class ChatbotScreeningConfig(BaseModel):
+    require_other_chatbot: bool = True
+    external_study_id: str = Field(..., pattern=r"^[a-f0-9]{24}$")
+    eligible_completion_url: str = Field(..., pattern=r"^https://app\.prolific\.com/submissions/complete\?cc=[A-Za-z0-9]+$")
+    other_completion_url: str = Field(..., pattern=r"^https://app\.prolific\.com/submissions/complete\?cc=[A-Za-z0-9]+$")
+
+
 class ResearchSpec(BaseModel):
     """Versioned study design, independent of any one interview agent."""
 
@@ -140,6 +147,7 @@ class ResearchSpec(BaseModel):
     fielding: ResearchFielding = Field(default_factory=ResearchFielding)
     # Persisted for analysis, but deliberately excluded from the live prompt.
     analysis_notes: str = Field("", max_length=10000)
+    chatbot_screening: ChatbotScreeningConfig | None = None
 
 
 # ── Request Schemas ──────────────────────────────────────────

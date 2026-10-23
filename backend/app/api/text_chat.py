@@ -511,10 +511,10 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
                 elif not check.acceptable or check.issue != "none":
                     controller.record_rejection(text, check.issue, check.correction)
                     if move["action"] == "main" and check.issue in {"already_answered", "unsupported_premise"}:
-                        rejected_anchors.append((move, check.issue))
+                        rejected_anchors.append((move, check))
                     if check.purpose_exhausted or check.issue == "participant_limit":
                         controller.retire_rejected_opportunity(move, check.issue)
-                    controller.defer_rejected_anchor(move, check.issue)
+                    controller.defer_rejected_anchor(move, check.issue, check=check)
                     raise ConversationRepair(check.correction or check.issue)
             review = controller.accept_turn(text, decision, move)
             break
@@ -530,8 +530,8 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
                             "Repair it once using an eligible move. " + last_issue})
             context.append({"role": "system", "content": controller.authoritative_model_note()})
     if review is None:
-        for rejected_anchor, issue in rejected_anchors:
-            controller.defer_rejected_anchor(rejected_anchor, issue, final=True)
+        for rejected_anchor, check in rejected_anchors:
+            controller.defer_rejected_anchor(rejected_anchor, check.issue, final=True, check=check)
         review = controller.fallback_turn(last_issue)
     return {"content": control_marker_prefix(review.marker, review.decision) + " " + review.text,
             **usage}, review
