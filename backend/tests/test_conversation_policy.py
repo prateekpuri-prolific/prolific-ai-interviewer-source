@@ -129,6 +129,11 @@ def test_budgets_reserve_later_topics_without_claiming_coverage(limit):
 
 def test_nonuser_anchor_uses_exposure_wording():
     c = controller(topic="everyday_use", answer="No, I don't use AI tools.")
+    assert c.ai_use is None  # No lexical inference before the semantic observer.
+    obs = observation(c, opportunities=False)
+    obs.ai_use = "no_ai_use"
+    obs.ai_use_quote = c.history[-1]["answer"]
+    c.apply_observation(obs)
     assert c.ai_use == "no_ai_use"
     assert "hear" in c.eligible_moves()[0]["wording"].lower()
 
@@ -190,6 +195,7 @@ def test_thread_respects_anchor_dependencies():
 
 def test_clarification_does_not_consume_budget_or_change_active_question():
     c = controller()
+    c.turn_kind = "clarification"
     original_index = c.current_question_index
     d = TurnDecision("clarify", 2, None)
     text = 'Thinking of an AI chatbot, what were you doing the last time you used one?'
@@ -275,12 +281,26 @@ async def test_failed_repair_cannot_deliver_an_anchor_rejected_as_out_of_bounds(
     assert c.states[3].stopped_reason == 'question_check:' + issue
 
 
-def test_two_interrogatives_are_rejected_even_with_one_question_mark():
+async def test_semantic_checker_rejects_compound_question(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.api import text_chat as api
+    from app.pipeline import conversation_policy as policy
     c = controller()
     c.apply_observation(observation(c))
     _, decision = probe_move(c)
-    with pytest.raises(ConversationRepair, match='one clean'):
-        c.validate_turn('What prompted you to choose AI, and how did it go?', decision, c.history[-1]['answer'])
+    import json
+    marker = '[[TURN ' + json.dumps(vars(decision)) + ']] '
+    monkeypatch.setattr(api, '_call_llm', AsyncMock(side_effect=[
+        {'content': marker + 'What prompted you to choose AI, and how did it go?'},
+        {'content': marker + 'What prompted you to choose AI?'}]))
+    monkeypatch.setattr(api, '_get_key', AsyncMock(return_value='test'))
+    monkeypatch.setattr(api, '_openai_api_base', AsyncMock(return_value=None))
+    monkeypatch.setattr(policy, 'check_question', AsyncMock(side_effect=[
+        (QuestionCheck(acceptable=False, issue='multiple_questions', correction='Ask only about motivation.'), {'prompt_tokens':0,'completion_tokens':0}),
+        (QuestionCheck(acceptable=True, issue='none', correction=''), {'prompt_tokens':0,'completion_tokens':0})]))
+    _, review = await api._contextual_agent_turn(c, [], model='test', study_id=None, participant_text=c.history[-1]['answer'])
+    assert review.text == 'What prompted you to choose AI?'
+    assert any(e.get('reason') == 'Ask only about motivation.' for e in c.events)
 
 
 def test_fallback_skips_covered_topics_after_a_partial_anchor():
@@ -469,12 +489,14 @@ async def test_missing_marker_repair_keeps_selected_clarification(monkeypatch):
     ]))
     monkeypatch.setattr(api, '_get_key', AsyncMock(return_value='test'))
     monkeypatch.setattr(api, '_openai_api_base', AsyncMock(return_value=None))
-    checker = AsyncMock(return_value=(QuestionCheck(acceptable=True, issue='none', correction=''), {'prompt_tokens': 1, 'completion_tokens': 1}))
+    checker = AsyncMock(side_effect=[
+        (QuestionCheck(acceptable=False, issue='multiple_questions', correction='Ask one information need.'), {'prompt_tokens': 1, 'completion_tokens': 1}),
+        (QuestionCheck(acceptable=True, issue='none', correction=''), {'prompt_tokens': 1, 'completion_tokens': 1})])
     monkeypatch.setattr(policy, 'check_question', checker)
     _, review = await api._contextual_agent_turn(c, [], model='test', study_id=None, participant_text=c.history[-1]['answer'])
     assert review.text == 'What would you want it to disclose?'
     assert review.question_index == c.ids['vision']
-    assert checker.await_count == 1
+    assert checker.await_count == 2
     assert any(e['action'] == 'repair_marker_recovered' for e in c.events)
 
 

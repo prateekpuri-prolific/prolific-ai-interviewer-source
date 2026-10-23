@@ -33,7 +33,7 @@ def controller():
 
 
 def test_clarification_cannot_be_overridden_by_topic_change():
-    c=controller();move=next(m for m in c.eligible_moves() if m['action']=='main')
+    c=controller();c.turn_kind='clarification';move=next(m for m in c.eligible_moves() if m['action']=='main')
     with pytest.raises(ConversationRepair,match='preserve'):
         c.validate_turn(move['wording'],TurnDecision('main',move['question'],move['intent']),'I don’t understand your question closer to what ?')
     review=c.accept_turn('Have you heard of any progress toward the health outcome you mentioned?',TurnDecision('clarify'),{})
@@ -41,7 +41,7 @@ def test_clarification_cannot_be_overridden_by_topic_change():
 
 
 async def test_clarification_repair_survives_two_bad_generations(monkeypatch):
-    c=controller()
+    c=controller();c.turn_kind='clarification'
     monkeypatch.setattr(api,'_call_llm',AsyncMock(return_value={'content':'[[TURN {"action":"close","question":null,"intent":null}]] Goodbye.'}))
     _,review=await api._contextual_agent_turn(c,[],model='test',study_id=None,participant_text='I don’t understand your question closer to what ?')
     assert review.decision.action=='clarify' and not c.closed
@@ -119,7 +119,6 @@ async def test_full_chat_break_clarification_and_addendum_preserve_question(
     llm=AsyncMock(side_effect=[
         {'content':'[[TURN {"action":"main","question":1,"intent":"everyday_use:main"}]] What do you use AI for?'},
         {'content':'[[TURN {"action":"main","question":2,"intent":"vision:main"}]] What would you hope AI could do?'},
-        {'content':'[[TURN {"action":"clarify","question":null,"intent":null}]] What would you like AI to make possible for you?'},
         {'content':'[[TURN {"action":"close","question":null,"intent":null}]] Thank you.'},
     ])
     observer=AsyncMock(return_value=(policy.Observation(updates=[],opportunities=[],ai_use='unknown',ai_use_quote='',
@@ -132,6 +131,14 @@ async def test_full_chat_break_clarification_and_addendum_preserve_question(
     monkeypatch.setattr(api,'_get_key',AsyncMock(return_value='test'))
     monkeypatch.setattr(api,'_openai_api_base',AsyncMock(return_value=None))
     monkeypatch.setattr(api,'_redact_participant_text',AsyncMock(side_effect=api.redact_text))
+    from app.pipeline import turn_router
+    async def route(**kwargs):
+        text=kwargs['payload']['latest_turn']
+        repairs={'let me think':('continuation',"Take your time."),
+                 'I don’t understand your question':('clarification','What would you like AI to make possible for you?')}
+        kind,reply=repairs.get(text,('answer',''))
+        return turn_router.TurnRoute(kind=kind,answer_quote=text if kind=='answer' else '',reply=reply,information_fields=[]), {'prompt_tokens':0,'completion_tokens':0}
+    monkeypatch.setattr(turn_router,'route_participant_turn',route)
     monkeypatch.setattr(policy,'observe_conversation',observer)
     monkeypatch.setattr(policy,'check_question',AsyncMock(return_value=(policy.QuestionCheck(acceptable=True,issue='none',correction=''),{'prompt_tokens':0,'completion_tokens':0})))
     await api.text_chat_ws(socket,agent.widget_key,pid=None,external_study_id=None,external_session_id=None,

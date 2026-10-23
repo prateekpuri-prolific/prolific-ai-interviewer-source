@@ -316,6 +316,12 @@ async def test_contextual_websocket_observes_sanitized_answers_and_finalizes(
     monkeypatch.setattr(api, "_get_key", AsyncMock(return_value="test"))
     monkeypatch.setattr(api, "_openai_api_base", AsyncMock(return_value=None))
     monkeypatch.setattr(api, "_redact_participant_text", AsyncMock(side_effect=api.redact_text))
+    from app.pipeline import turn_router
+    async def route(**kwargs):
+        text = kwargs['payload']['latest_turn']
+        kind = 'stop' if stop and text != "Yes, let's begin." else 'answer'
+        return turn_router.TurnRoute(kind=kind, answer_quote=text if kind=='answer' else '', reply='', information_fields=[]), {'prompt_tokens':0,'completion_tokens':0}
+    monkeypatch.setattr(turn_router, 'route_participant_turn', route)
     monkeypatch.setattr(policy, "observe_conversation", observer)
     monkeypatch.setattr(policy, "check_question", AsyncMock(return_value=(
         policy.QuestionCheck(acceptable=True, issue="none", correction=""),

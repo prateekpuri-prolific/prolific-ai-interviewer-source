@@ -467,7 +467,7 @@ async def _judge_structured_turn(
 async def _contextual_agent_turn(controller, messages, *, model, study_id, participant_text):
     """Generate, semantically check and repair once before delivering a turn."""
     from app.pipeline.conversation_policy import ConversationRepair, check_question
-    from app.pipeline.interview_guide import strip_control_markers, control_marker_prefix, classify_participant_turn, TurnDecision
+    from app.pipeline.interview_guide import strip_control_markers, control_marker_prefix, TurnDecision
 
     if getattr(controller, 'awaiting_answer_completion', False):
         controller.awaiting_answer_completion = False
@@ -477,8 +477,8 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
     # Replace transient server state rather than accumulating stale decisions.
     context = [m for m in messages if not str(m.get("content", "")).startswith("[CONVERSATION STATE")]
     context = context + [{"role": "system", "content": controller.authoritative_model_note()}]
-    kind = classify_participant_turn(participant_text, controller.language, infer_incomplete=False)
-    interrupted = kind in {"clarification", "procedural", "flow_repair", "continuation"}
+    kind = controller.turn_kind
+    interrupted = kind in {"clarification", "procedural", "flow_repair", "continuation", "uncertain"}
     if interrupted:
         context.append({"role": "system", "content":
             "The participant is asking for conversational help. Only action=clarify is allowed. "
@@ -1345,34 +1345,48 @@ async def text_chat_ws(
                 structured_controller.remaining_seconds = max(0, timing.target_seconds - (
                     datetime.now(timezone.utc) - start_time).total_seconds())
 
-            # A clearly stated desire to end the session is equivalent to the
-            # Finish interview control. This matters in voice-default mode,
-            # where participants may naturally say it instead of tapping.
-            if structured_controller is not None:
-                from app.pipeline.interview_guide import (
-                    classify_participant_turn,
+            # Interpret natural-language intent once, with dialogue context.
+            # Explicit Finish/Pause controls above remain immediate UI actions.
+            from app.pipeline.interview_guide import classify_participant_turn
+            route = None
+            route_info = participant_information(agent_cfg["research_spec"]) or {}
+            if isinstance(structured_controller, ContextualInterviewController):
+                from app.pipeline.turn_router import route_participant_turn
+                route, route_usage = await route_participant_turn(
+                    api_key=await _get_key("openai_api_key"), api_base=await _openai_api_base(),
+                    model=settings.conversation_router_model,
+                    fallback_model=settings.conversation_router_fallback_model,
+                    timeout_seconds=settings.conversation_router_timeout_seconds,
+                    payload={"latest_turn": user_text,
+                             "actual_question": structured_controller._last_text or welcome,
+                             "research_question_started": bool(structured_controller._last_text),
+                             "recent_dialogue": [m for m in messages if m["role"] in {"assistant", "user"}
+                                                 and not m["content"].startswith("[CONVERSATION STATE")][-16:],
+                             "participant_information": route_info,
+                             "language": agent_cfg["language"] or "en"},
                 )
-
-                if classify_participant_turn(
-                    user_text, agent_cfg["language"] or "en", infer_incomplete=False
-                ) == "stop":
-                    await websocket.send_json({
-                        "type": "ended",
-                        "reason": "participant_finished",
-                        "text": (
-                            "Your responses have been saved. Thank you for "
-                            "your participation."
-                        ),
-                    })
-                    final_status = SessionStatus.COMPLETED
-                    final_reason = "participant_finished"
-                    break
+                kind_for_turn = route.kind
+                structured_controller.turn_kind = route.kind
+                structured_controller.events.append({"action": "semantic_route", "sequence": sequence,
+                                                     "kind": route.kind, **route_usage})
+                evidence_judge_prompt_tokens += route_usage["prompt_tokens"]
+                evidence_judge_completion_tokens += route_usage["completion_tokens"]
+            else:
+                kind_for_turn = (classify_participant_turn(user_text, agent_cfg["language"] or "en",
+                                                         infer_incomplete=False)
+                                 if structured_controller is not None else "answer")
+            if kind_for_turn == "stop":
+                await websocket.send_json({"type": "ended", "reason": "participant_finished",
+                    "text": "Your responses have been saved. Thank you for your participation."})
+                final_status = SessionStatus.COMPLETED
+                final_reason = "participant_finished"
+                break
 
             # High-risk interruptions are answered without a model call. This
             # makes privacy/data-use replies faithful to the public protocol
             # and prevents the active question from being lost to a model-
             # authored progress marker.
-            if structured_controller is not None:
+            if structured_controller is not None and not isinstance(structured_controller, ContextualInterviewController):
                 from app.pipeline.interview_guide import (
                     classify_participant_turn,
                     looks_like_more_procedural_help,
@@ -1469,12 +1483,12 @@ async def text_chat_ws(
                     structured_controller._pending_thread = True
                     structured_controller.events.append({"action": "participant_addendum", "question": previous_index + 1})
 
-            if (isinstance(structured_controller, ContextualInterviewController)
-                    and classify_participant_turn(user_text, agent_cfg["language"] or "en", infer_incomplete=False) == "answer"):
+            evidence_text = route.answer_quote if route is not None else user_text
+            if isinstance(structured_controller, ContextualInterviewController) and evidence_text:
                 if structured_controller._last_text:
-                    structured_controller.note_answer(user_text, sequence)
+                    structured_controller.note_answer(evidence_text, sequence)
                 else:
-                    structured_controller.note_opening_answer(user_text, sequence, welcome)
+                    structured_controller.note_opening_answer(evidence_text, sequence, welcome)
 
             # Evidence coverage is judged independently from the moderator.
             # The call is batched across every unresolved/partial criterion.
@@ -1485,14 +1499,12 @@ async def text_chat_ws(
                 structured_controller is not None
                 and (settings.evidence_judge_enabled or isinstance(structured_controller, ContextualInterviewController))
                 and structured_controller.needs_evidence_judge
-                and classify_participant_turn(
-                    user_text, agent_cfg["language"] or "en", infer_incomplete=False
-                )
-                == "answer"
+                and bool(evidence_text)
+                and (route is not None or kind_for_turn == "answer")
             ):
                 judge_result = await _judge_structured_turn(
                     structured_controller,
-                    participant_text=user_text,
+                    participant_text=evidence_text,
                     participant_sequence=sequence,
                 )
                 authoritative_evidence_for_turn = bool(
@@ -1524,6 +1536,19 @@ async def text_chat_ws(
             if addendum_resume is not None:
                 (structured_controller._last_text, structured_controller._last_question_index,
                  structured_controller._pending_thread) = addendum_resume
+            if route is not None and route.kind != "answer":
+                from app.pipeline.turn_router import repair_text
+                from app.pipeline.interview_guide import TurnDecision
+                reply = repair_text(route, route_info)
+                # A pure procedural answer does not replace the pending research question.
+                if route.kind in {"clarification", "flow_repair"}:
+                    structured_controller.accept_turn(reply, TurnDecision("clarify"), {})
+                messages.append({"role": "assistant", "content": reply})
+                sequence = await _send_scripted_agent_turn(websocket, session_id, reply, sequence)
+                agent_sent_at = time.monotonic()
+                continue
+
+            if addendum_resume is not None:
                 reply = "Thanks for adding that. " + structured_controller.current_prompt_text
                 messages.append({"role": "assistant", "content": reply})
                 sequence = await _send_scripted_agent_turn(websocket, session_id, reply, sequence)
@@ -1538,13 +1563,7 @@ async def text_chat_ws(
             elapsed_after_answer = (
                 datetime.now(timezone.utc) - start_time
             ).total_seconds()
-            participant_kind_for_timing = (
-                classify_participant_turn(
-                    user_text, agent_cfg["language"] or "en", infer_incomplete=False
-                )
-                if structured_controller is not None
-                else "answer"
-            )
+            participant_kind_for_timing = kind_for_turn
             timing_turn_is_answer = participant_kind_for_timing not in {
                 "procedural",
                 "flow_repair",
@@ -1713,7 +1732,12 @@ async def text_chat_ws(
                     # extra from the context too, otherwise a crammed-in second
                     # question gets skipped: the participant never saw it but
                     # the model thinks it asked it.
-                    enforced, dropped = enforce_one_question_per_turn(display_text)
+                    if isinstance(structured_controller, ContextualInterviewController):
+                        # The semantic question checker judges compound questions;
+                        # punctuation is not a reliable question boundary.
+                        enforced, dropped = display_text, 0
+                    else:
+                        enforced, dropped = enforce_one_question_per_turn(display_text)
                     if dropped:
                         logger.info(
                             f"[guide:text] {session_id}: cut {dropped} chars "

@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.pipeline.interview_guide import (
-    EvidenceStateTracker, TurnDecision, TurnReview, classify_participant_turn,
+    TurnDecision, TurnReview,
 )
 
 POLICY_VERSION = "contextual_v1"
@@ -444,6 +444,7 @@ class ContextualInterviewController:
         self.rejected_sources = 0
         self._seen: set[str] = set()
         self.deferred_anchors: set[int] = set()
+        self.turn_kind = "answer"
 
     @property
     def total_questions(self):
@@ -512,10 +513,6 @@ class ContextualInterviewController:
         self._previous_answer_remaining = self.remaining_seconds
         self.history.append({"sequence": sequence, "question": self._last_text,
                              "answer": text, "topic_id": self.questions[self._last_question_index]["id"]})
-        if self.questions[self.current_question_index].get("phase") == "warm_up":
-            uses = EvidenceStateTracker._ai_use_from_warmup(text)
-            if uses is not None:
-                self.ai_use = "uses_ai" if uses else "no_ai_use"
         self.opportunities = {}
 
     def observer_context(self):
@@ -737,8 +734,7 @@ class ContextualInterviewController:
         return None
 
     def validate_turn(self, text: str, decision: TurnDecision | None, participant_text: str):
-        kind = classify_participant_turn(participant_text, self.language, infer_incomplete=False)
-        if kind in {"clarification", "procedural", "flow_repair", "continuation"}:
+        if self.turn_kind in {"clarification", "procedural", "flow_repair", "continuation", "uncertain"}:
             if not decision or decision.action != "clarify":
                 raise ConversationRepair("Respond to the participant interruption and preserve the active question. Use clarify; do not advance or close.")
             return {"action": "clarify", "purpose": "Answer the participant's clarification and preserve the active question."}
@@ -751,9 +747,7 @@ class ContextualInterviewController:
         if decision.action in {"main", "close"} and any(m.get("priority") == "high" for m in self.eligible_moves()):
             raise ConversationRepair("A valuable grounded opportunity remains. Use it before changing topics.")
         if decision.action != "close":
-            if (text.count("?") > 1 or (decision.action in {"probe", "thread"}
-                    and re.search(r"\band\s+(?:what|how|why|when|where|who|which)\b", text, re.I))
-                    or not text.strip() or "[[" in text):
+            if not text.strip() or "[[" in text:
                 raise ConversationRepair("Ask one clean, substantive question without control tags.")
             key = re.sub(r"\W+", " ", text.lower()).strip()
             if key in self._seen:
@@ -950,7 +944,7 @@ class ContextualInterviewController:
                 "completed": self.closed, "session_finished": self.closed,
                 "coverage_complete": all(s.coverage not in {"missing", "partial"} for s in self.states),
                 "coverage_by_topic": {q["id"]: s.coverage for q, s in zip(self.questions, self.states)},
-                "policy_revision": "pilot-repair-and-cohort-verification-v021",
+                "policy_revision": "semantic-turn-routing-v022",
                 "chatbot_use": self.chatbot_use, "chatbot_use_source": self.chatbot_use_source,
                 "time_constrained": self.time_constrained,
                 "follow_ups": self.follow_ups, "observer_failures": self.observer_failures,

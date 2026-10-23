@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # unsupported skip.
     evidence_judge_enabled: bool = True
     evidence_judge_model: str = "gpt-5.6-terra"
+    conversation_router_model: str = "gpt-5.6-terra"
+    conversation_router_fallback_model: str = "gpt-5.6-terra"
+    conversation_router_timeout_seconds: float = 6.0
 
     # Contextual privacy is a second layer after deterministic local redaction.
     # The model receives only locally minimised text and its response is not
