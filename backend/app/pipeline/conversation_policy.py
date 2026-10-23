@@ -583,7 +583,15 @@ class ContextualInterviewController:
                 self.rejected_sources += 1
                 continue
             state = self.states[index]
-            if update.coverage in TERMINAL and index != self._last_question_index:
+            # No desired outcome makes progress toward it inapplicable. This
+            # is the sole dependent-topic exception: it must share the exact
+            # evidence used for the active vision answer, not another topic.
+            dependent_progress = (
+                update.topic_id == 'vision_progress' and update.coverage == 'not_applicable'
+                and active_question['id'] == 'vision'
+                and any(u.topic_id == 'vision' and u.quote == update.quote for u in observation.updates)
+            )
+            if update.coverage in TERMINAL and index != self._last_question_index and not dependent_progress:
                 self.rejected_sources += 1
                 continue
             if state.coverage in TERMINAL and not update.correction:

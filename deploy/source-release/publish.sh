@@ -118,7 +118,8 @@ if [[ -n "$EXISTING_RELEASE_URL" ]]; then
   exit 0
 fi
 
-gh repo clone "$PUBLIC_SOURCE_REPO" "$PUBLISH_DIR" -- --quiet >&2
+# Publication only needs the current public snapshot, not every prior export.
+gh repo clone "$PUBLIC_SOURCE_REPO" "$PUBLISH_DIR" -- --quiet --depth=1 >&2
 rsync -a --delete --exclude='.git/' "$EXPORT_DIR/" "$PUBLISH_DIR/"
 
 git -C "$PUBLISH_DIR" config user.name "Prolific Source Release"

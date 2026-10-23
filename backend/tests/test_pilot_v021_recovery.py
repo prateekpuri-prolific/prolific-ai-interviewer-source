@@ -162,3 +162,17 @@ async def test_grounded_cutoff_invites_completion_without_a_model_probe(monkeypa
     assert review.decision.action=='clarify' and 'finish your thought' in review.text
     assert c.follow_ups==0 and c.current_question_index==3
     model.assert_not_called()
+
+
+def test_explicit_no_outcome_can_mark_dependent_progress_inapplicable():
+    from app.pipeline.conversation_policy import Observation, TopicUpdate
+    c=controller();c.current_question_index=c._last_question_index=c.ids['vision']
+    answer='I do not have a hoped-for outcome for AI. Nothing comes to mind.'
+    c.note_answer(answer,8)
+    c.apply_observation(Observation(updates=[
+        TopicUpdate(topic_id='vision',coverage='adequate',quote=answer,meaning='No desired outcome',exploration='settled',correction=False),
+        TopicUpdate(topic_id='vision_progress',coverage='not_applicable',quote=answer,meaning='No outcome to assess progress toward',exploration='settled',correction=False),
+        TopicUpdate(topic_id='company_trust',coverage='unknown',quote=answer,meaning='Unsupported unrelated absence',exploration='settled',correction=False)],
+        opportunities=[],ai_use='unknown',ai_use_quote='',chatbot_use='unclear',chatbot_use_quote='',chatbot_use_sequence=None,boundaries=[]))
+    assert c.states[c.ids['vision_progress']].coverage=='not_applicable'
+    assert c.states[c.ids['company_trust']].coverage=='missing'
