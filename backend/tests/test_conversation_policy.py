@@ -701,3 +701,17 @@ def test_partial_answer_does_not_retire_whole_main_topic():
     c.defer_rejected_anchor(move, 'already_answered', final=True, check=check)
     assert move in c.eligible_moves()
     assert c.states[move['question'] - 1].coverage == 'missing'
+
+
+def test_bare_closing_topic_is_neutral_and_survives_wording_repair():
+    c = controller(topic='close', answer='Data centres.')
+    obs = observation(c, coverage='partial', purpose='Understand their concern')
+    obs.opportunities[0].move = 'clarify_meaning'
+    c.apply_observation(obs)
+    move, decision = probe_move(c)
+    assert 'without assuming' in move['purpose']
+    c.retire_rejected_opportunity(move, 'unsupported_premise')
+    assert move['intent'] in c.opportunities
+    review = c.fallback_turn('A concern is not established')
+    assert not review.closed
+    assert review.text == 'Could you say a little more about what you mean?'

@@ -165,7 +165,9 @@ When the ACTIVE topic is closing and its max_follow_ups is positive, a new
 substantive point in the answer may receive ONE focused follow-up under that
 closing topic's own id. Seek the missing meaning or a useful concrete detail;
 do not reopen earlier topics. A bare new label such as 'data centers' deserves
-one clarification. A new example may merit one detail, but a complete account,
+one neutral clarification. A bare topic does not establish whether it is a hope
+or a worry: ask what they would like to add about it without supplying that
+stance. A new example may merit one detail, but a complete account,
 'nothing else', uncertainty or a wish to finish should close without probing.
 Do not propose a purpose already answered or asked in another form. A topic
 change does not reset meaning: if a participant already defined the outcome
@@ -601,6 +603,10 @@ class ContextualInterviewController:
             if q.get("phase") == "closing" and (index != self.current_question_index
                                                     or self.time_constrained):
                 continue
+            if q.get("phase") == "closing" and opportunity.move == "clarify_meaning":
+                opportunity = opportunity.model_copy(update={
+                    "purpose": "Clarify what the participant wants to add about this new point, without assuming it is a hope or concern.",
+                })
             if any(not self.states[self.ids[dep]].asked for dep in q.get("depends_on", [])):
                 continue
             if index != self.current_question_index and (q.get("sensitivity") == "elevated"
@@ -725,6 +731,12 @@ class ContextualInterviewController:
     def retire_rejected_opportunity(self, move, issue):
         # A semantic contradiction cannot be repaired by paraphrasing the same
         # information need. Remove it without claiming the topic is covered.
+        if (issue == "unsupported_premise" and move.get("move") == "clarify_meaning"
+                and self.questions[move["question"] - 1].get("phase") == "closing"):
+            # A guessed stance in the wording must not erase the opportunity
+            # to ask neutrally what a newly volunteered topic means.
+            self.events.append({"action": "closing_clarification_preserved", "intent": move["intent"]})
+            return
         if move["action"] in {"probe", "thread"} and issue in {"already_answered", "participant_limit", "unsupported_premise"}:
             self.opportunities.pop(move["intent"], None)
             self.attempted.append({"topic_id": self.questions[move["question"] - 1]["id"],
