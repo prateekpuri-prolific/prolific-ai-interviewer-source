@@ -190,11 +190,13 @@ def test_thread_respects_anchor_dependencies():
 
 def test_clarification_does_not_consume_budget_or_change_active_question():
     c = controller()
-    original = c.current_prompt_text
+    original_index = c.current_question_index
     d = TurnDecision("clarify", 2, None)
-    move = c.validate_turn("I mean tools such as AI chatbots. Shall we continue?", d, "What do you mean by AI?")
-    c.accept_turn("I mean AI chatbots. Shall we continue?", d, move)
-    assert c.current_prompt_text == original
+    text = 'Thinking of an AI chatbot, what were you doing the last time you used one?'
+    move = c.validate_turn(text, d, "What do you mean by AI?")
+    c.accept_turn(text, d, move)
+    assert c.current_question_index == original_index
+    assert c.current_prompt_text == text
     assert c.follow_ups == 0
 
 

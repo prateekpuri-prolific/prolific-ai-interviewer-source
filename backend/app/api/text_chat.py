@@ -18,7 +18,7 @@ import secrets
 import time
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
@@ -60,7 +60,8 @@ router = APIRouter()
 _MAX_CHAT_DURATION = 7200  # 2 hours absolute ceiling
 _KEEPALIVE_INTERVAL = 20  # seconds between keepalive pings
 _INACTIVITY_WARNING_SECONDS = 60
-_INACTIVITY_CLOSE_GRACE_SECONDS = 60
+_INACTIVITY_CLOSE_GRACE_SECONDS = 180
+_PARTICIPANT_PAUSE_SECONDS = 300
 _EVIDENCE_JUDGE_TIMEOUT_SECONDS = 20
 _PARTICIPANT_EXPERIENCE_EVENTS = {
     "connection_opened",
@@ -466,11 +467,24 @@ async def _judge_structured_turn(
 async def _contextual_agent_turn(controller, messages, *, model, study_id, participant_text):
     """Generate, semantically check and repair once before delivering a turn."""
     from app.pipeline.conversation_policy import ConversationRepair, check_question
-    from app.pipeline.interview_guide import strip_control_markers, control_marker_prefix
+    from app.pipeline.interview_guide import strip_control_markers, control_marker_prefix, classify_participant_turn, TurnDecision
+
+    if getattr(controller, 'awaiting_answer_completion', False):
+        controller.awaiting_answer_completion = False
+        review = controller.accept_turn("Please go ahead and finish your thought—I'm listening.", TurnDecision('clarify'), {})
+        return {'content':review.text, 'prompt_tokens':0, 'completion_tokens':0}, review
 
     # Replace transient server state rather than accumulating stale decisions.
     context = [m for m in messages if not str(m.get("content", "")).startswith("[CONVERSATION STATE")]
     context = context + [{"role": "system", "content": controller.authoritative_model_note()}]
+    kind = classify_participant_turn(participant_text, controller.language, infer_incomplete=False)
+    interrupted = kind in {"clarification", "procedural", "flow_repair", "continuation"}
+    if interrupted:
+        context.append({"role": "system", "content":
+            "The participant is asking for conversational help. Only action=clarify is allowed. "
+            "Briefly explain or restate the active question in plain language, without inventing "
+            "facts or changing topic. Ask at most one question. Do not ask them to confirm readiness; "
+            "let their next answer respond to this question. Active question: " + controller.current_prompt_text})
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
     last_issue = "generation_failed"
     review = None
@@ -529,12 +543,34 @@ async def _contextual_agent_turn(controller, messages, *, model, study_id, parti
             context.append({"role": "system", "content": "The proposed turn was NOT delivered. "
                             "Repair it once using an eligible move. " + last_issue})
             context.append({"role": "system", "content": controller.authoritative_model_note()})
+    if review is None and interrupted:
+        text = ("Take your time. I'm listening." if kind == "continuation" else
+                "Let me put the question back here. " + controller.current_prompt_text)
+        decision = TurnDecision("clarify", None, None)
+        review = controller.accept_turn(text, decision, {"action": "clarify"})
     if review is None:
         for rejected_anchor, check in rejected_anchors:
             controller.defer_rejected_anchor(rejected_anchor, check.issue, final=True, check=check)
         review = controller.fallback_turn(last_issue)
     return {"content": control_marker_prefix(review.marker, review.decision) + " " + review.text,
             **usage}, review
+
+
+async def _wait_for_participant_resume(websocket, seconds):
+    """A bounded break; keepalive traffic cannot extend it or become an answer."""
+    deadline = time.monotonic() + seconds
+    await websocket.send_json({"type": "paused", "seconds_remaining": int(seconds)})
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=remaining)
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("type") in {"resume", "finish"}:
+            return msg
 
 
 async def _keepalive_loop(ws: WebSocket, stop: asyncio.Event) -> None:
@@ -1067,6 +1103,7 @@ async def text_chat_ws(
     awaiting_interruption_confirmation = False
     prioritization_injected = False
     final_question_asked = False
+    paused_seconds = 0.0
     try:
         while True:
             # The configured duration is a target. Only the grace-period
@@ -1151,6 +1188,28 @@ async def text_chat_ws(
             except json.JSONDecodeError:
                 continue
 
+            if msg.get("type") == "pause":
+                available = max(0, _PARTICIPANT_PAUSE_SECONDS - paused_seconds)
+                if available <= 0:
+                    await websocket.send_json({"type": "pause_unavailable", "text": "Your break time has been used. You can continue or finish the interview."})
+                    continue
+                pause_started = time.monotonic()
+                try:
+                    msg = await _wait_for_participant_resume(websocket, available)
+                except asyncio.TimeoutError:
+                    final_status = SessionStatus.TIMED_OUT
+                    final_reason = "participant_inactive"
+                    await websocket.send_json({"type": "ended", "reason": final_reason,
+                        "text": "Your break has ended. Your responses have been saved."})
+                    break
+                finally:
+                    pause_duration = time.monotonic() - pause_started
+                    paused_seconds += pause_duration
+                    start_time += timedelta(seconds=pause_duration)
+                await websocket.send_json({"type": "resumed", "paused_seconds": paused_seconds})
+                if msg.get("type") == "resume":
+                    continue
+
             # Browser-local voice capture and typing can take a while before a
             # complete answer is submitted. Throttled activity signals keep a
             # genuinely active participant from being timed out mid-answer.
@@ -1215,7 +1274,7 @@ async def text_chat_ws(
                 final_reason = "participant_finished"
                 break
 
-            if msg.get("type") != "message" or not msg.get("text", "").strip():
+            if msg.get("type") not in {"message", "addendum"} or not msg.get("text", "").strip():
                 continue
 
             redaction = await _redact_participant_text(msg["text"].strip())
@@ -1243,8 +1302,9 @@ async def text_chat_ws(
                 # A withheld answer provides no research evidence. Keep the
                 # current question rather than praising it or advancing the guide.
                 redirect = (
-                    "Let's stay with the same question. Could you answer in general terms, "
-                    "without details about a specific person? You can also skip this question."
+                    "Please keep your answer general, without personal medical or identifying details. "
+                    "You can also skip. " + (structured_controller.current_prompt_text if structured_controller else
+                    "Could you answer the previous question in general terms?")
                 )
                 messages.append({"role": "user", "content": user_text})
                 messages.append({"role": "assistant", "content": redirect})
@@ -1396,6 +1456,19 @@ async def text_chat_ws(
                         agent_sent_at = time.monotonic()
                     continue
 
+            addendum_resume = None
+            if (msg.get("type") == "addendum" and isinstance(structured_controller, ContextualInterviewController)
+                    and structured_controller.history):
+                previous = structured_controller.history[-1]
+                previous_index = structured_controller.ids.get(previous["topic_id"])
+                if previous_index is not None:
+                    addendum_resume = (structured_controller._last_text, structured_controller._last_question_index,
+                                       structured_controller._pending_thread)
+                    structured_controller._last_text = previous["question"]
+                    structured_controller._last_question_index = previous_index
+                    structured_controller._pending_thread = True
+                    structured_controller.events.append({"action": "participant_addendum", "question": previous_index + 1})
+
             if (isinstance(structured_controller, ContextualInterviewController)
                     and classify_participant_turn(user_text, agent_cfg["language"] or "en", infer_incomplete=False) == "answer"):
                 if structured_controller._last_text:
@@ -1448,6 +1521,14 @@ async def text_chat_ws(
                     },
                 )
 
+            if addendum_resume is not None:
+                (structured_controller._last_text, structured_controller._last_question_index,
+                 structured_controller._pending_thread) = addendum_resume
+                reply = "Thanks for adding that. " + structured_controller.current_prompt_text
+                messages.append({"role": "assistant", "content": reply})
+                sequence = await _send_scripted_agent_turn(websocket, session_id, reply, sequence)
+                continue
+
             # Nudge the model to advance/close once a question's budget is up.
             if structured_controller is not None:
                 nudge = structured_controller.maybe_advance_message(user_text)
@@ -1469,14 +1550,14 @@ async def text_chat_ws(
                 "flow_repair",
                 "clarification",
                 "continuation",
-            }
+            } and not getattr(structured_controller, 'awaiting_answer_completion', False)
 
             # Once the signposted final question has been answered, close
             # without launching another topic. An answer that runs past the
             # target is still saved in full before this close.
             if timing_turn_is_answer and (
                 final_question_asked
-                or elapsed_after_answer >= timing.target_seconds
+                or (elapsed_after_answer >= timing.target_seconds and structured_controller is None)
             ):
                 closing = (
                     structured_controller.close_for_time()
@@ -1501,6 +1582,7 @@ async def text_chat_ws(
             # free-form interviews receive an explicit orchestration cue.
             if (
                 not final_question_asked
+                and timing_turn_is_answer
                 and elapsed_after_answer >= timing.final_question_at_seconds
             ):
                 if structured_controller is not None:
@@ -1617,7 +1699,8 @@ async def text_chat_ws(
                     # question; wait for an explicit yes before repeating the
                     # exact suspended question.
                     if (
-                        classify_participant_turn(
+                        not isinstance(structured_controller, ContextualInterviewController)
+                        and classify_participant_turn(
                             user_text, agent_cfg["language"] or "en", infer_incomplete=False
                         )
                         == "clarification"
@@ -1767,7 +1850,7 @@ async def text_chat_ws(
                     )
                     sess.completion_metadata = {
                         "reason": final_reason,
-                        "timing": timing.as_dict(),
+                        "timing": {**timing.as_dict(), "participant_pause_seconds": round(paused_seconds, 2)},
                         "participant_experience": {
                             "initial_response_mode": (
                                 response_mode

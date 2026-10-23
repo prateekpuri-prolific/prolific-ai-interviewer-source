@@ -89,3 +89,78 @@ async def test_older_cohort_does_not_require_other_chatbot_use(client, db_sessio
     r = await client.post('/api/screeners/'+widget,json=payload(widget, others=['none']))
     assert r.status_code == 200
     assert r.json()['completion_url'] == config['eligible_completion_url']
+
+from app.api.cohort_screening import assess_cohort, COHORTS
+
+
+def verification_for(cohort):
+    v={'country':'uk','english':'yes','age':'18_29','last_use':'never','frequency':'none','contexts':['none']}
+    if cohort=='older_nondegree':v.update(age='50_64',education='below_bachelors')
+    if cohort.startswith('health_'):v['health']='yes'
+    if cohort in {'health_nonclaude_users','claude_control'}:v.update(last_use='past30',frequency='weekly',contexts=['work'])
+    return v
+
+
+@pytest.mark.parametrize('cohort',COHORTS)
+async def test_each_cohort_saves_auditable_verification_and_paid_completion(client,db_session,screening,cohort):
+    widget,config=screening
+    study=(await db_session.execute(select(Study))).scalar_one()
+    study.research_spec={**study.research_spec,'chatbot_screening':{**config,'cohort':cohort}}
+    await db_session.commit()
+    p=payload(widget,claude='yes' if cohort=='claude_control' else 'no',others=['chatgpt'] if cohort=='health_nonclaude_users' else ['none'],verification=verification_for(cohort))
+    r=await client.post('/api/screeners/'+widget,json=p)
+    assert r.status_code==200 and r.json()['completion_url']==config['eligible_completion_url']
+    saved=(await db_session.execute(select(Session))).scalar_one()
+    assert saved.research_protocol_version=='cohort-screen-v2'
+    assert saved.completion_metadata['screening']['reasons']==[]
+    page=await client.get('/api/screeners/'+widget,params={'PROLIFIC_PID':'b'*24,'STUDY_ID':'a'*24,'SESSION_ID':'c'*24})
+    assert 'Where do you currently live?' in page.text
+    assert 'diagnos' not in page.text.lower()
+
+
+@pytest.mark.parametrize('cohort,key,value',[
+    ('young_nonusers','age','30_49'),('older_nondegree','education','bachelors'),
+    ('older_nondegree','age','30_49'),('health_nonusers','health','unsure'),
+    ('health_nonclaude_users','health','no'),('ai_nonusers','country','other'),
+    ('claude_control','english','no'),('ai_nonusers','last_use','past30'),
+    ('ai_nonusers','contexts',['research']),('ai_nonusers','frequency','weekly')])
+def test_major_fields_are_actually_required_for_eligibility(cohort,key,value):
+    v=verification_for(cohort);v[key]=value
+    result=assess_cohort({'cohort':cohort},'yes' if cohort=='claude_control' else 'no',['chatgpt'] if cohort=='health_nonclaude_users' else ['none'],v)
+    assert not result['eligible'] and result['reasons']
+
+
+def test_former_research_use_is_eligible_but_not_labelled_never_use():
+    v=verification_for('ai_nonusers');v.update(last_use='older',contexts=['research'])
+    result=assess_cohort({'cohort':'ai_nonusers'},'no',['chatgpt'],v)
+    assert result['eligible'] and result['use_group']=='no_recent_use'
+
+
+@pytest.mark.parametrize('cohort',['ai_nonusers','young_nonusers','health_nonusers'])
+@pytest.mark.parametrize('frequency,eligible',[('rare',True),('monthly',False),('weekly',False),('several_weekly',False),('daily',False),('unsure',False)])
+def test_low_use_threshold_counts_all_contexts(cohort,frequency,eligible):
+    v=verification_for(cohort);v.update(last_use='past90',frequency=frequency,contexts=['work','research'])
+    result=assess_cohort({'cohort':cohort},'no',['chatgpt'],v)
+    assert result['eligible'] is eligible
+    if frequency=='rare':assert result['use_group']=='rare_use'
+
+
+def test_rare_claude_use_is_allowed_only_in_low_use_not_nonclaude_cohorts():
+    v=verification_for('ai_nonusers');v.update(last_use='past30',frequency='rare',contexts=['personal'])
+    assert assess_cohort({'cohort':'ai_nonusers'},'yes',['none'],v)['eligible']
+    v.update(age='50_64',education='high_school')
+    assert 'claude_nonuse_not_confirmed' in assess_cohort({'cohort':'older_nondegree'},'yes',['none'],v)['reasons']
+
+
+def test_unknown_claude_never_proves_nonclaude():
+    assert not assess_cohort({'cohort':'older_nondegree'},'unsure',['none'],verification_for('older_nondegree'))['eligible']
+
+
+async def test_ineligible_v2_answers_are_saved_and_paid(client,db_session,screening):
+    widget,config=screening;study=(await db_session.execute(select(Study))).scalar_one()
+    study.research_spec={**study.research_spec,'chatbot_screening':{**config,'cohort':'young_nonusers'}};await db_session.commit()
+    v=verification_for('young_nonusers');v['age']='50_64'
+    r=await client.post('/api/screeners/'+widget,json=payload(widget,others=['none'],verification=v))
+    assert r.status_code==200 and r.json()['completion_url']==config['other_completion_url']
+    saved=(await db_session.execute(select(Session))).scalar_one()
+    assert 'young_age_not_confirmed' in saved.completion_metadata['screening']['reasons']

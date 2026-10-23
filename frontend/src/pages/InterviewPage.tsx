@@ -156,6 +156,11 @@ export default function InterviewPage() {
   const [finishDialogOpen, setFinishDialogOpen] = useState(false);
   const [finishingInterview, setFinishingInterview] = useState(false);
   const [inactivityWarning, setInactivityWarning] = useState(false);
+  const [participantPaused, setParticipantPaused] = useState(false);
+  const participantPausedRef = useRef(false);
+  const [addingToPrevious, setAddingToPrevious] = useState(false);
+  const pausedAtRef = useRef<number | null>(null);
+  const pausedTotalMsRef = useRef(0);
   const [inactivitySecondsRemaining, setInactivitySecondsRemaining] = useState(60);
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
   const [feedbackSession, setFeedbackSession] = useState<{ sessionId: string; token: string } | null>(null);
@@ -510,6 +515,10 @@ export default function InterviewPage() {
   }, [pauseRecordingForInactivity]);
 
   const resumeAfterInactivity = useCallback(() => {
+    if (participantPausedRef.current) {
+      wsRef.current?.send(JSON.stringify({type: "resume"}));
+      return;
+    }
     signalParticipantActivity(true);
     recordExperienceEvent("inactivity_resumed");
     clearInactivityWarning();
@@ -650,7 +659,7 @@ export default function InterviewPage() {
       ws.onopen = async () => {
         const start = Date.now();
         timerRef.current = setInterval(() => {
-          setElapsed(Math.floor((Date.now() - start) / 1000));
+          setElapsed(Math.floor(((pausedAtRef.current ?? Date.now()) - start - pausedTotalMsRef.current) / 1000));
         }, 1000);
 
         const mic = new MicCapture();
@@ -777,6 +786,11 @@ export default function InterviewPage() {
     setInactivityWarning(false);
     setInactivitySecondsRemaining(60);
     setChatMessages([]);
+    participantPausedRef.current = false;
+    setParticipantPaused(false);
+    pausedAtRef.current = null;
+    pausedTotalMsRef.current = 0;
+    setAddingToPrevious(false);
     agentTypingRef.current = false;
     setAgentTyping(false);
     recordingStateRef.current = "idle";
@@ -816,7 +830,7 @@ export default function InterviewPage() {
         recordExperienceEvent("connection_opened", { mode: responseModeRef.current });
         const start = Date.now();
         timerRef.current = setInterval(() => {
-          setElapsed(Math.floor((Date.now() - start) / 1000));
+          setElapsed(Math.floor(((pausedAtRef.current ?? Date.now()) - start - pausedTotalMsRef.current) / 1000));
         }, 1000);
       };
 
@@ -882,6 +896,23 @@ export default function InterviewPage() {
               if (audioEnabledRef.current && config?.audio_available) {
                 void playPromptAudio(msg.text, false, true);
               }
+              break;
+            case "paused":
+              participantPausedRef.current = true;
+              setParticipantPaused(true);
+              pausedAtRef.current = Date.now();
+              stopPromptAudio();
+              showInactivityWarning(Number(msg.seconds_remaining));
+              break;
+            case "resumed":
+              participantPausedRef.current = false;
+              setParticipantPaused(false);
+              pausedTotalMsRef.current += pausedAtRef.current ? Date.now() - pausedAtRef.current : 0;
+              pausedAtRef.current = null;
+              clearInactivityWarning();
+              break;
+            case "pause_unavailable":
+              setRecordingError(msg.text);
               break;
             case "inactivity_warning":
               showInactivityWarning(Number(msg.seconds_remaining) || 60);
@@ -971,7 +1002,7 @@ export default function InterviewPage() {
     }
   }, [widgetKey, config, participantId, externalStudyId, externalSessionId, consentAccepted, canStart, cleanupConnection, playPromptAudio, releaseTurnMicrophone, showInactivityWarning, clearInactivityWarning, micCheckStatus, recordExperienceEvent, resetFeedback]);
 
-  const sendParticipantText = useCallback((value: string, finishInterview = false) => {
+  const sendParticipantText = useCallback((value: string, finishInterview = false, addendum = false) => {
     const text = value.trim();
     if ((!text && !finishInterview) || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
 
@@ -1004,7 +1035,7 @@ export default function InterviewPage() {
       setFinishingInterview(true);
       wsRef.current.send(JSON.stringify({ type: "finish", text }));
     } else {
-      wsRef.current.send(JSON.stringify({ type: "message", text }));
+      wsRef.current.send(JSON.stringify({ type: addendum ? "addendum" : "message", text }));
     }
     return true;
   }, [clearInactivityWarning, recordExperienceEvent]);
@@ -1081,6 +1112,7 @@ export default function InterviewPage() {
       !widgetKey ||
       responseModeRef.current !== "voice" ||
       agentTypingRef.current ||
+      participantPausedRef.current ||
       wsRef.current?.readyState !== WebSocket.OPEN ||
       recordingStateRef.current !== "idle" ||
       mediaRecorderRef.current?.state === "recording"
@@ -1229,8 +1261,9 @@ export default function InterviewPage() {
 
   // ── Send text message ──────────────────────────────────────
   const handleSendMessage = useCallback(() => {
-    sendParticipantText(chatInput);
-  }, [chatInput, sendParticipantText]);
+    if (agentTyping || participantPaused) return;
+    if (sendParticipantText(chatInput, false, addingToPrevious)) setAddingToPrevious(false);
+  }, [chatInput, sendParticipantText, addingToPrevious, agentTyping, participantPaused]);
 
   const handleStop = useCallback(() => {
     setFinishDialogOpen(true);
@@ -1612,6 +1645,7 @@ export default function InterviewPage() {
                   </button>
                 )}
                 <span className="hidden font-mono text-xs tabular-nums text-gray-400 sm:block">{formatTime(elapsed)}</span>
+                {wsRef.current && <button type="button" disabled={agentTyping || participantPaused || recordingState !== "idle"} onClick={() => wsRef.current?.send(JSON.stringify({type: "pause"}))} className="rounded-full border border-gray-200 px-3 py-1.5 text-xs disabled:opacity-50">Take a break</button>}
                 <button onClick={handleStop} disabled={finishingInterview} className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-wait disabled:opacity-50">{finishingInterview ? "Finishing…" : "Finish interview"}</button>
               </div>
             </header>
@@ -1646,13 +1680,13 @@ export default function InterviewPage() {
               <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-3 sm:px-7" role="alert">
                 <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-3">
                   <div>
-                    <p className="text-sm font-semibold text-amber-950">Still there?</p>
+                    <p className="text-sm font-semibold text-amber-950">{participantPaused ? "Interview paused" : "Still there?"}</p>
                     <p className="mt-0.5 text-xs text-amber-800">
-                      Listening is paused. This interview will close and save in {inactivitySecondsRemaining} second{inactivitySecondsRemaining === 1 ? "" : "s"} unless you continue.
+                      {participantPaused ? "Your interview timer is paused. Keep this tab open." : "Listening is paused."} This interview will close and save in {inactivitySecondsRemaining} second{inactivitySecondsRemaining === 1 ? "" : "s"} unless you continue.
                     </p>
                   </div>
                   <button type="button" onClick={resumeAfterInactivity} className="rounded-lg bg-amber-900 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-950">
-                    I’m still here
+                    {participantPaused ? "Resume interview" : "I’m still here"}
                   </button>
                 </div>
               </div>
@@ -1781,7 +1815,7 @@ export default function InterviewPage() {
                       <button
                         type="button"
                         onClick={() => void startRecording()}
-                        disabled={status !== "active" || agentTyping}
+                        disabled={status !== "active" || participantPaused || agentTyping}
                         className="flex min-h-16 w-full items-center justify-center gap-3 rounded-xl font-medium text-white transition hover:opacity-90 active:scale-[0.995] disabled:cursor-not-allowed disabled:opacity-40"
                         style={{ backgroundColor: primaryColor }}
                       >
@@ -1822,7 +1856,7 @@ export default function InterviewPage() {
                         value={chatInput}
                         onChange={(event) => { setChatInput(event.target.value); resizeChatInput(event.target); signalParticipantActivity(); }}
                         onKeyDown={(event) => {
-                          if (event.key === "Enter" && !event.shiftKey) {
+                          if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
                             event.preventDefault();
                             handleSendMessage();
                           }
@@ -1831,11 +1865,12 @@ export default function InterviewPage() {
                         placeholder={agentTyping ? "The interviewer is responding…" : "Write your response…"}
                         aria-label="Your response"
                         autoFocus
-                        disabled={status !== "active" || agentTyping}
+                        disabled={status !== "active" || participantPaused}
                       />
-                      <button type="submit" aria-label="Send response" disabled={!chatInput.trim() || status !== "active" || agentTyping} className="mb-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30" style={{ backgroundColor: primaryColor }}><SendIcon className="h-5 w-5" /></button>
+                      <button type="submit" aria-label="Send response" disabled={!chatInput.trim() || status !== "active" || agentTyping || participantPaused} className="mb-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30" style={{ backgroundColor: primaryColor }}><SendIcon className="h-5 w-5" /></button>
                     </div>
-                    <div className="flex items-center justify-between gap-3 px-3 pb-1 text-[10px] text-gray-400"><span>Typing mode</span><span className="hidden sm:inline">Enter to send · Shift+Enter for a new line</span></div>
+                    {chatMessages.some(m => m.role === "user") && <label className="flex items-center gap-2 px-3 py-2 text-xs text-gray-600"><input type="checkbox" checked={addingToPrevious} onChange={e => setAddingToPrevious(e.target.checked)} />Add this to my previous answer</label>}
+                    <div className="flex items-center justify-between gap-3 px-3 pb-1 text-[10px] text-gray-400"><span>Typing mode</span><span>Enter adds a line · Tap Send when ready</span></div>
                   </form>
                 )}
                 {(recordingError || audioError) && <p role="status" className="mt-2 text-center text-[11px] text-amber-700">{recordingError || audioError}</p>}

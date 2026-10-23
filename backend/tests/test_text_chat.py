@@ -447,7 +447,7 @@ async def test_synthetic_pii_disclosure_warns_continues_and_never_persists_or_ex
     assert any(item.get("type") == "finalized" for item in websocket.sent)
 
     assert mock_llm.await_count == 2
-    redirects = [item for item in websocket.sent if item.get("text", "").startswith("Let's stay with the same question.")]
+    redirects = [item for item in websocket.sent if item.get("text", "").startswith("Please keep your answer general,")]
     assert len(redirects) == 2
     all_model_messages = str(
         [call.kwargs["messages"] for call in mock_llm.await_args_list]

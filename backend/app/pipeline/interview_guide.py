@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -64,6 +65,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 _CLARIFICATION_PATTERNS_BY_LANG: dict[str, list[str]] = {
     "en": [
         r"\bwhat do you mean\b",
+        r"\b(?:closer|further|farther) to what\b",
+        r"\b(?:i )?(?:forgot|forget|lost track of) (?:what|which|the|your).*question",
+        r"\b(?:cannot|can't|do not) understand (?:your |the |this )?question\b",
         r"\bi (?:don't|do not) know what you mean\b",
         r"\bwhat does that mean\b",
         r"\b(?:that|this|your|the) question (?:(?:doesn't|does not) make sense|(?:isn't|is not) clear)\b",
@@ -220,6 +224,13 @@ def strip_progress_marker(text: str) -> tuple[str, Optional[int]]:
     return cleaned, found
 
 
+def normalize_participant_control_text(text: str) -> str:
+    """Normalize typography only for control detection; keep stored answers intact."""
+    return unicodedata.normalize("NFKC", text or "").translate(str.maketrans({
+        "’": "'", "‘": "'", "ʼ": "'", "“": '"', "”": '"',
+    })).strip()
+
+
 def looks_like_clarification(text: str, language: str = "en") -> bool:
     """True if a user turn reads as a clarification/repeat request rather
     than an answer (e.g. "sorry?", "what do you mean by that?").
@@ -227,7 +238,7 @@ def looks_like_clarification(text: str, language: str = "en") -> bool:
     ``language`` is the agent's configured interview language ("de",
     "de-DE", "es", ...); region suffixes are ignored.
     """
-    text = (text or "").strip()
+    text = normalize_participant_control_text(text)
     if not text:
         return False
     lang = (language or "en").split("-")[0].split("_")[0].lower()
@@ -327,7 +338,8 @@ _FLOW_REPAIR_RE = re.compile(
 )
 _CONTINUATION_RE = re.compile(
     r"^(?:wait|hold on|one (?:second|moment)|i(?:'m| am) not done|"
-    r"let me finish|i have more|let me keep going|can i continue)[.! ]*$",
+    r"let me finish|i have more|let me keep going|can i continue|let me think|"
+    r"give me (?:a |one )?(?:moment|second|minute)|i need (?:a )?(?:moment|time) to think)[.! ]*$",
     re.IGNORECASE,
 )
 _PROCEDURAL_RESUME_RE = re.compile(
@@ -364,7 +376,7 @@ def classify_participant_turn(text: str, language: str = "en", *, infer_incomple
     an answer would be clearly wrong. Everything else remains ``answer`` and
     is left to the evidence-aware model/controller.
     """
-    cleaned = (text or "").strip()
+    cleaned = normalize_participant_control_text(text)
     if not cleaned:
         return "answer"
     if _EXPLICIT_STOP_RE.search(cleaned):

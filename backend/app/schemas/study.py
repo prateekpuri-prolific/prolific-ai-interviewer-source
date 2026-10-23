@@ -113,6 +113,7 @@ class ResearchFielding(BaseModel):
 
 
 class ChatbotScreeningConfig(BaseModel):
+    cohort: Literal["ai_nonusers", "older_nondegree", "young_nonusers", "health_nonusers", "health_nonclaude_users", "claude_control"] | None = None
     require_other_chatbot: bool = True
     external_study_id: str = Field(..., pattern=r"^[a-f0-9]{24}$")
     eligible_completion_url: str = Field(..., pattern=r"^https://app\.prolific\.com/submissions/complete\?cc=[A-Za-z0-9]+$")

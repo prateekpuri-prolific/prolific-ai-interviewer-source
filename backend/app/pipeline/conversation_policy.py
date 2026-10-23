@@ -54,6 +54,7 @@ class Observation(BaseModel):
     updates: list[TopicUpdate]
     opportunities: list[Opportunity]
     experience_gap: Opportunity | None = None
+    unfinished_answer_quote: str = ""
     ai_use: Literal["uses_ai", "no_ai_use", "unknown"]
     ai_use_quote: str
     chatbot_use: Literal["uses_chatbots", "research_only", "no_chatbot_use", "unclear"]
@@ -81,6 +82,8 @@ usable answer; it does NOT prohibit a valuable follow-up. partial means a
 specific important part is missing. A short answer can be adequate. Do not
 upgrade evidence just because time/probe budget ran out. Explicit uncertainty,
 refusal and non-applicability apply only to what the participant is answering.
+A request to explain, repeat, wait, or finish an answer is conversation repair,
+not lack of knowledge, refusal, or evidence about a research topic.
 Use coverage=unknown for explicit lack of knowledge, declined for refusal,
 and not_applicable for no applicable experience. Do not label those adequate
 merely because the guide says such responses are acceptable. Adequate is a
@@ -96,6 +99,28 @@ alone; a distinct recent example is still needed.
 Do not reopen settled topics unless the participant explicitly revises them;
 mark correction=true only with a quote expressing that correction. Preserve
 the participant's beliefs as their beliefs, not verified world facts.
+Depth should concentrate on one or two participant-defined threads. When a
+participant names a consequential experience or a tension (usefulness alongside
+distrust, access alongside cost, hopes alongside harms), consider one grounded
+question about what happened, what it changed, or what distinction matters.
+A source label alone (online, a video, a podcast) need not exhaust the meaning
+of a concern. Prefer useful detail over mechanically asking where every view
+came from. Do not ask why an obvious harm is bad or why an obvious benefit is
+good, and do not pursue extra depth after a clear limit or explicit uncertainty.
+When someone describes both what they want to keep doing themselves and what
+they would delegate to AI, consider a grounded opportunity to understand that
+distinction or what the change would mean. Do not ask them to list tasks they
+already named. Do not assume convenience is the whole reason.
+If they wish to delegate specific everyday tasks but have not described what
+that would change in their life, offer one high-priority consequence opportunity
+about that change. The tasks themselves are already known. Do not ask which
+tasks again, or ask them to justify why an obvious benefit is good. Skip this
+when an impact is already explained or they have expressed a limit.
+If the latest answer is clearly cut off mid-word or mid-thought, put its exact
+unfinished trailing phrase in unfinished_answer_quote. Otherwise return an
+empty string. Typos, terse complete answers, imperfect grammar and uncertainty
+are not cut-offs. This is a request to let the participant finish, not a probe
+about the content or permission to guess the missing word.
 Report boundaries only for an explicit refusal to discuss the active sensitive
 subject more broadly (for example, 'I prefer not to discuss personal
 circumstances' in the health module). Return that module's exact name and an
@@ -137,6 +162,10 @@ already been answered, there is no episode, a limit was expressed, or the topic
 has moved on. This is not a minimum number of probes. Do not duplicate this
 opportunity in opportunities. Existing time and sensitivity limits still apply.
 
+If the participant explicitly has no hoped-for AI outcome, record
+vision_progress as not_applicable with that exact quote. Do not invent a hope
+or ask them to reconsider having none. Wanting AI stopped or abolished IS a
+stated desired outcome, distinct from having no desired outcome.
 An unfinished statement is not a fully expressed hope. Offer one high-priority
 clarify_meaning opportunity to finish it before asking about progress. Do not
 complete dangling pronouns or predicates yourself. Ask what they meant or
@@ -506,6 +535,12 @@ class ContextualInterviewController:
 
     def apply_observation(self, observation: Observation):
         latest = self.history[-1]
+        trailing = observation.unfinished_answer_quote.strip()
+        self.awaiting_answer_completion = bool(trailing and latest['answer'].strip().endswith(trailing))
+        if self.awaiting_answer_completion:
+            self.opportunities = {}
+            self.events.append({'action':'unfinished_answer', 'sequence':latest['sequence'], 'quote':trailing})
+            return
         active_question = self.questions[self._last_question_index]
         for boundary in observation.boundaries:
             if (active_question.get("sensitivity") != "elevated"
@@ -628,6 +663,14 @@ class ContextualInterviewController:
         self.events.append({"action": "observer_unavailable", "sequence": self.history[-1]["sequence"]})
 
     def _next_index(self):
+        if "vision" in self.ids and "vision_progress" in self.ids:
+            vision = self.states[self.ids["vision"]]
+            progress = self.states[self.ids["vision_progress"]]
+            if vision.coverage == "not_applicable" and progress.coverage == "missing":
+                progress.coverage = "not_applicable"
+                progress.exploration = "settled"
+                progress.sources = [dict(source, meaning="No desired outcome was stated, so progress toward it is not applicable.", source="topic_dependency") for source in vision.sources]
+                progress.stopped_reason = "no_desired_outcome"
         start = self.current_question_index + int(self.states[self.current_question_index].asked)
         for index in range(start, len(self.questions)):
             q, state = self.questions[index], self.states[index]
@@ -687,7 +730,9 @@ class ContextualInterviewController:
 
     def validate_turn(self, text: str, decision: TurnDecision | None, participant_text: str):
         kind = classify_participant_turn(participant_text, self.language, infer_incomplete=False)
-        if decision and decision.action == "clarify" and kind in {"clarification", "procedural", "flow_repair"}:
+        if kind in {"clarification", "procedural", "flow_repair", "continuation"}:
+            if not decision or decision.action != "clarify":
+                raise ConversationRepair("Respond to the participant interruption and preserve the active question. Use clarify; do not advance or close.")
             return {"action": "clarify", "purpose": "Answer the participant's clarification and preserve the active question."}
         if not decision:
             raise ConversationRepair("Supply a valid TURN marker and select an eligible move.")
@@ -699,7 +744,7 @@ class ContextualInterviewController:
             raise ConversationRepair("A valuable grounded opportunity remains. Use it before changing topics.")
         if decision.action != "close":
             if (text.count("?") > 1 or (decision.action in {"probe", "thread"}
-                    and re.search(r"\band\s+(?:what|how|why|when|where|who)\b", text, re.I))
+                    and re.search(r"\band\s+(?:what|how|why|when|where|who|which)\b", text, re.I))
                     or not text.strip() or "[[" in text):
                 raise ConversationRepair("Ask one clean, substantive question without control tags.")
             key = re.sub(r"\W+", " ", text.lower()).strip()
@@ -768,12 +813,19 @@ class ContextualInterviewController:
                                       "quote": check.answer_reuse_quote,
                                       "meaning": "Existing answer satisfies this topic's purpose.",
                                       "source": "question_check"})
-        if issue == "participant_limit" or (issue in {"already_answered", "unsupported_premise"} and final):
+        if issue == "unsupported_premise":
+            self.events.append({"action": "anchor_preserved", "question": index + 1,
+                                "reason": "repair_wording_not_topic"})
+            return
+        if issue == "participant_limit" or (issue == "already_answered" and final):
             self.deferred_anchors.add(index)
             self.states[index].stopped_reason = "question_check:" + issue
 
     def accept_turn(self, text, decision, move):
         if decision.action == "clarify":
+            if "?" in text:
+                self._last_text = text
+            self.events.append({'action':'clarify', 'question':self._last_question_index + 1, 'delivered_text':text})
             return TurnReview(text=text, marker=None, decision=decision, question_index=self.current_question_index)
         if decision.action == "close":
             self.closed = True
@@ -840,6 +892,10 @@ class ContextualInterviewController:
                     text = self.main_wording(candidate)
                     decision = TurnDecision("main", candidate + 1, question["id"] + ":main")
                     return self.accept_turn(text, decision, {"purpose": self.topic_purpose(candidate)})
+                if question['id'] == 'recent_encounter' and not state.asked:
+                    text = self.main_wording(candidate)
+                    return self.accept_turn(text, TurnDecision('main', candidate + 1, question['id'] + ':main'),
+                                            {'purpose': self.topic_purpose(candidate)})
                 state.stopped_reason = "generation_failure_incomplete"
                 continue
             if (state.coverage in TERMINAL | {"adequate"} and not question.get("always_ask")
@@ -886,7 +942,7 @@ class ContextualInterviewController:
                 "completed": self.closed, "session_finished": self.closed,
                 "coverage_complete": all(s.coverage not in {"missing", "partial"} for s in self.states),
                 "coverage_by_topic": {q["id"]: s.coverage for q, s in zip(self.questions, self.states)},
-                "policy_revision": "pilot-closing-and-evidence-recovery",
+                "policy_revision": "pilot-repair-and-cohort-verification-v021",
                 "chatbot_use": self.chatbot_use, "chatbot_use_source": self.chatbot_use_source,
                 "time_constrained": self.time_constrained,
                 "follow_ups": self.follow_ups, "observer_failures": self.observer_failures,

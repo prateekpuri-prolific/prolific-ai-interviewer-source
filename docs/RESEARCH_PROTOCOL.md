@@ -97,3 +97,36 @@ Telephone interviews compile the same study context and store a snapshot, but
 they cannot use the web consent checkbox. A telephone deployment must put an
 appropriate spoken consent flow in the opening before treating consent as
 confirmed.
+
+### Paid cohort verification and conversation recovery (pilot v0.21)
+
+The optional `chatbot_screening.cohort` config selects a deterministic paid
+questionnaire. It verifies residence, adult/age band, English, chatbot brands,
+last use, frequency over three months and contexts of use; education and broad
+long-term health/disability status are asked only for relevant cohorts. No
+model interprets eligibility and no diagnosis or free text is collected.
+Both completion routes are paid and require manual submission review.
+
+For the three low-use cohorts (legacy routing IDs `ai_nonusers`,
+`young_nonusers`, `health_nonusers`), eligible frequency is no use or less than
+monthly (one or two uses in three months). Preserve `never_used`,
+`no_recent_use` and `rare_use` in analysis. Intentional personal, work,
+education and paid-research use count; passive search summaries do not.
+`older_nondegree` and `health_nonclaude_users` still require no lifetime Claude
+use. The older cohort does not require another chatbot. The Claude comparison
+requires self-reported Claude use without an added frequency threshold.
+Native demographic/country/language filters supplement verification; native
+“None of these” chatbot filters must not exclude rare users from screening.
+
+Create new draft studies for this definition rather than relabelling collected
+interviews. Match saved questionnaire identity and answers to an actual Prolific
+submission before inviting, deduplicate across cohorts, and keep the researcher's
+paid place limits. Questionnaire completion is not automatic interview admission.
+
+Contextual interviews preserve their active topic during clarification,
+thinking time and unfinished answers. Participants can take up to five minutes
+of break time per session with the tab open, and can explicitly append to their
+previous answer. Text Enter adds a line; Send or Ctrl/Cmd+Enter submits. Breaks
+are recorded separately from active interview time. This is not reconnect or
+cross-device resume. Conversation quality still requires transcript review;
+mechanical tests and fixed-prefix replays do not establish human realism.
