@@ -46,9 +46,11 @@ def payload(widget, **changes):
         "started": int(time.time()),
         "consent": True,
         "profession": "ui_designer",
+        "ui_experience": "three_five",
         "hands_on_code": "yes",
         "ai_for_frontend": "yes",
         "ai_tools": ["cursor", "chatgpt"],
+        "visual_judgment": "often",
         "challenge_ready": "yes",
     }
     result.update(changes)
@@ -61,10 +63,13 @@ def payload(widget, **changes):
 @pytest.mark.parametrize("changes,eligible", [
     ({}, True),
     ({"profession": "frontend_developer"}, True),
+    ({"profession": "design_engineer"}, True),
     ({"profession": "graphic_designer"}, False),
+    ({"ui_experience": "one_two"}, False),
     ({"hands_on_code": "no"}, False),
     ({"ai_for_frontend": "no"}, False),
     ({"ai_tools": ["none"]}, False),
+    ({"visual_judgment": "rarely_never"}, False),
     ({"challenge_ready": "no"}, False),
 ])
 async def test_screener_routes_and_records_decision(client, db_session, screener, changes, eligible):
@@ -79,7 +84,7 @@ async def test_screener_routes_and_records_decision(client, db_session, screener
     saved = (await db_session.execute(select(Session))).scalar_one()
     assert saved.completion_metadata["screening"]["eligible"] is eligible
     assert saved.participant_consent_confirmed
-    assert len((await db_session.execute(select(TranscriptEntry))).scalars().all()) == 10
+    assert len((await db_session.execute(select(TranscriptEntry))).scalars().all()) == 14
 
 
 async def test_form_contains_all_questions_and_hides_screenout_code(client, screener):
@@ -87,8 +92,8 @@ async def test_form_contains_all_questions_and_hides_screenout_code(client, scre
     response = await client.get("/api/frontend-screen/" + widget, params={
         "PROLIFIC_PID": "b" * 24, "STUDY_ID": "a" * 24, "SESSION_ID": "c" * 24})
     assert response.status_code == 200
-    for text in ("Which best describes", "personally written or edited frontend code",
-                 "Which AI tools", "specific recent challenge", "$0.50"):
+    for text in ("Which best describes", "how many years", "personally written or edited frontend code",
+                 "Which AI tools", "visual or interaction quality", "specific recent challenge", "$0.50"):
         assert text in response.text
     assert "SCREENOUT" not in response.text
     assert response.headers["cache-control"] == "no-store"

@@ -31,6 +31,7 @@ PROFESSIONS = {
     "ui_designer": "UX/UI or product designer",
     "fullstack_developer": "Full-stack developer or engineer",
     "web_designer": "Web designer",
+    "design_engineer": "Design engineer or creative developer",
     "backend_developer": "Backend developer or engineer",
     "graphic_designer": "Visual or graphic designer",
     "ux_researcher": "UX researcher",
@@ -52,7 +53,7 @@ TOOLS = {
     "none": "None of these",
 }
 QUALIFYING_PROFESSIONS = {
-    "frontend_developer", "ui_designer", "fullstack_developer", "web_designer"
+    "frontend_developer", "ui_designer", "fullstack_developer", "web_designer", "design_engineer"
 }
 
 
@@ -64,9 +65,11 @@ class FrontendScreeningAnswer(BaseModel):
     token: str = Field(min_length=64, max_length=64)
     consent: Literal[True]
     profession: Literal[tuple(PROFESSIONS)]
+    ui_experience: Literal["under_one", "one_two", "three_five", "six_plus"]
     hands_on_code: Literal["yes", "no"]
     ai_for_frontend: Literal["yes", "no"]
     ai_tools: list[Literal[tuple(TOOLS)]] = Field(min_length=1, max_length=len(TOOLS))
+    visual_judgment: Literal["often", "sometimes", "rarely_never"]
     challenge_ready: Literal["yes", "no"]
 
 
@@ -82,12 +85,16 @@ def assess(answer: FrontendScreeningAnswer) -> list[str]:
     reasons = []
     if answer.profession not in QUALIFYING_PROFESSIONS:
         reasons.append("profession_outside_frontend_ui")
+    if answer.ui_experience in {"under_one", "one_two"}:
+        reasons.append("under_three_years_ui_experience")
     if answer.hands_on_code != "yes":
         reasons.append("no_recent_personal_ui_code")
     if answer.ai_for_frontend != "yes":
         reasons.append("no_recent_ai_frontend_use")
     if not (set(answer.ai_tools) - {"none"}):
         reasons.append("no_work_ai_tool")
+    if answer.visual_judgment == "rarely_never":
+        reasons.append("no_visual_interaction_judgment")
     if answer.challenge_ready != "yes":
         reasons.append("not_ready_to_discuss_recent_challenge")
     return reasons
@@ -151,15 +158,17 @@ async def form(widget: str, PROLIFIC_PID: str = "", STUDY_ID: str = "", SESSION_
 <details><summary>Study information and privacy</summary>''' + paragraphs + '''<p>Prolific Academic Ltd is the data controller. <a href="https://www.prolific.com/privacy-and-legal" target="_blank" rel="noopener">Privacy and legal information</a>.</p></details>
 <form id="screen"><label><input type="checkbox" id="consent" required> I have read the study information and agree to take part.</label>
 <fieldset><legend>1. Which best describes your main professional work?</legend>''' + professions + '''</fieldset>
-<fieldset><legend>2. In the last three months, have you personally written or edited frontend code for a shipped or release-ready user interface?</legend><label><input type="radio" name="hands_on_code" value="yes" required> Yes</label><label><input type="radio" name="hands_on_code" value="no"> No</label></fieldset>
-<fieldset><legend>3. In the last three months, have you used AI to help implement or debug frontend UI work that you personally did?</legend><label><input type="radio" name="ai_for_frontend" value="yes" required> Yes</label><label><input type="radio" name="ai_for_frontend" value="no"> No</label></fieldset>
-<fieldset><legend>4. Which AI tools have you used for that work? Select all that apply.</legend>''' + tools + '''</fieldset>
-<fieldset><legend>5. Are you ready to discuss a specific recent challenge you had using AI for that frontend work?</legend><label><input type="radio" name="challenge_ready" value="yes" required> Yes</label><label><input type="radio" name="challenge_ready" value="no"> No</label></fieldset>
+<fieldset><legend>2. For how many years have you personally built or implemented frontend user interfaces as part of your work?</legend><label><input type="radio" name="ui_experience" value="under_one" required> Less than 1 year</label><label><input type="radio" name="ui_experience" value="one_two"> 1–2 years</label><label><input type="radio" name="ui_experience" value="three_five"> 3–5 years</label><label><input type="radio" name="ui_experience" value="six_plus"> 6 or more years</label></fieldset>
+<fieldset><legend>3. In the last three months, have you personally written or edited frontend code for a shipped or release-ready user interface?</legend><label><input type="radio" name="hands_on_code" value="yes" required> Yes</label><label><input type="radio" name="hands_on_code" value="no"> No</label></fieldset>
+<fieldset><legend>4. In the last three months, have you used AI to help implement or debug frontend UI work that you personally did?</legend><label><input type="radio" name="ai_for_frontend" value="yes" required> Yes</label><label><input type="radio" name="ai_for_frontend" value="no"> No</label></fieldset>
+<fieldset><legend>5. Which AI tools have you used for that work? Select all that apply.</legend>''' + tools + '''</fieldset>
+<fieldset><legend>6. How often does your frontend work involve judging visual or interaction quality, such as layout, typography, motion, brand fit, or overall feel?</legend><label><input type="radio" name="visual_judgment" value="often" required> Often</label><label><input type="radio" name="visual_judgment" value="sometimes"> Sometimes</label><label><input type="radio" name="visual_judgment" value="rarely_never"> Rarely or never</label></fieldset>
+<fieldset><legend>7. Are you ready to discuss a specific recent challenge where AI missed the visual, interaction, or aesthetic intent of that frontend work?</legend><label><input type="radio" name="challenge_ready" value="yes" required> Yes</label><label><input type="radio" name="challenge_ready" value="no"> No</label></fieldset>
 <p id="error" role="alert"></p><button id="submit">Submit answers</button></form>
 <section id="done" hidden><h2 id="outcome"></h2><p id="next-text"></p><a id="next" class="return"></a></section>
 <p><a href="https://app.prolific.com/studies">Leave without submitting and return to Prolific</a></p>
 <script>const context=''' + json.dumps(fields) + ''';
-document.getElementById('screen').addEventListener('submit',async e=>{e.preventDefault();const error=document.getElementById('error');const button=document.getElementById('submit');const ai_tools=[...document.querySelectorAll('input[name="ai_tools"]:checked')].map(x=>x.value);error.textContent='';if(!ai_tools.length||ai_tools.includes('none')&&ai_tools.length>1){error.textContent='Choose the tools used, or choose only None of these.';return;}button.disabled=true;try{const body={...context,consent:document.getElementById('consent').checked,profession:document.querySelector('input[name="profession"]:checked').value,hands_on_code:document.querySelector('input[name="hands_on_code"]:checked').value,ai_for_frontend:document.querySelector('input[name="ai_for_frontend"]:checked').value,ai_tools,challenge_ready:document.querySelector('input[name="challenge_ready"]:checked').value};const response=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:'Please check your answers or message the researcher on Prolific.');document.getElementById('screen').hidden=true;document.getElementById('done').hidden=false;document.getElementById('next').href=data.next_url;if(data.eligible){document.getElementById('outcome').textContent='You can continue to the interview';document.getElementById('next-text').textContent='Your answers have been saved. Continue to the full typed interview.';document.getElementById('next').textContent='Continue to interview';}else{document.getElementById('outcome').textContent='Thank you for your time';document.getElementById('next-text').textContent='This interview is not a match for your recent work. Return to Prolific to receive the $0.50 screening payment.';document.getElementById('next').textContent='Return to Prolific';}}catch(err){error.textContent=err.message;}finally{button.disabled=false;}});
+document.getElementById('screen').addEventListener('submit',async e=>{e.preventDefault();const error=document.getElementById('error');const button=document.getElementById('submit');const ai_tools=[...document.querySelectorAll('input[name="ai_tools"]:checked')].map(x=>x.value);error.textContent='';if(!ai_tools.length||ai_tools.includes('none')&&ai_tools.length>1){error.textContent='Choose the tools used, or choose only None of these.';return;}button.disabled=true;try{const body={...context,consent:document.getElementById('consent').checked,profession:document.querySelector('input[name="profession"]:checked').value,ui_experience:document.querySelector('input[name="ui_experience"]:checked').value,hands_on_code:document.querySelector('input[name="hands_on_code"]:checked').value,ai_for_frontend:document.querySelector('input[name="ai_for_frontend"]:checked').value,ai_tools,visual_judgment:document.querySelector('input[name="visual_judgment"]:checked').value,challenge_ready:document.querySelector('input[name="challenge_ready"]:checked').value};const response=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:'Please check your answers or message the researcher on Prolific.');document.getElementById('screen').hidden=true;document.getElementById('done').hidden=false;document.getElementById('next').href=data.next_url;if(data.eligible){document.getElementById('outcome').textContent='You can continue to the interview';document.getElementById('next-text').textContent='Your answers have been saved. Continue to the full typed interview.';document.getElementById('next').textContent='Continue to interview';}else{document.getElementById('outcome').textContent='Thank you for your time';document.getElementById('next-text').textContent='This interview is not a match for your recent work. Return to Prolific to receive the $0.50 screening payment.';document.getElementById('next').textContent='Return to Prolific';}}catch(err){error.textContent=err.message;}finally{button.disabled=false;}});
 </script></main></body></html>'''
     return HTMLResponse(html, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
@@ -203,9 +212,11 @@ async def submit(widget: str, answer: FrontendScreeningAnswer, db: AsyncSession 
         protocol_snapshot={"research_spec": study.research_spec},
         completion_metadata={"reason": "screening_complete", "screening": {
             "eligible": eligible, "reasons": reasons, "profession": answer.profession,
+            "ui_experience": answer.ui_experience,
             "hands_on_code": answer.hands_on_code,
             "ai_for_frontend": answer.ai_for_frontend,
-            "ai_tools": answer.ai_tools, "challenge_ready": answer.challenge_ready,
+            "ai_tools": answer.ai_tools, "visual_judgment": answer.visual_judgment,
+            "challenge_ready": answer.challenge_ready,
         }},
     )
     db.add(session)
@@ -221,9 +232,11 @@ async def submit(widget: str, answer: FrontendScreeningAnswer, db: AsyncSession 
         raise HTTPException(409, "This submission has already been used.")
     transcript = [
         ("Which best describes your main professional work?", PROFESSIONS[answer.profession]),
+        ("For how many years have you personally built frontend user interfaces?", answer.ui_experience),
         ("Have you personally written or edited frontend UI code in the last three months?", answer.hands_on_code),
         ("Have you used AI for your frontend UI implementation or debugging work in the last three months?", answer.ai_for_frontend),
         ("Which AI tools have you used for that work?", ", ".join(TOOLS[x] for x in answer.ai_tools)),
+        ("How often do you judge visual or interaction quality in that work?", answer.visual_judgment),
         ("Are you ready to discuss a specific recent AI challenge in that work?", answer.challenge_ready),
     ]
     for index, (question, response) in enumerate(transcript):
