@@ -1,4 +1,6 @@
 import time
+import json
+import uuid
 
 import pytest
 from sqlalchemy import select
@@ -7,6 +9,14 @@ from app.api.frontend_screening import signed_token
 from app.models.agent import Agent, AgentStatus
 from app.models.study import Study, StudyStatus
 from app.models.session import Session, TranscriptEntry
+from app.schemas.study import StudyUpdate
+
+
+def test_interview_gate_id_is_json_serializable():
+    payload = StudyUpdate.model_validate({"research_spec": {
+        "required_screener_agent_id": str(uuid.uuid4()),
+    }})
+    json.dumps(payload.model_dump(exclude_unset=True))
 
 
 @pytest.fixture

@@ -157,7 +157,9 @@ class ResearchSpec(BaseModel):
     analysis_notes: str = Field("", max_length=10000)
     chatbot_screening: ChatbotScreeningConfig | None = None
     frontend_screening: FrontendScreeningConfig | None = None
-    required_screener_agent_id: UUID | None = None
+    required_screener_agent_id: str | None = Field(
+        None, pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+    )
 
 
 # ── Request Schemas ──────────────────────────────────────────
