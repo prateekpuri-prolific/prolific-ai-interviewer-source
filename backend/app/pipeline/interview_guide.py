@@ -64,6 +64,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 _CLARIFICATION_PATTERNS_BY_LANG: dict[str, list[str]] = {
     "en": [
+        r"\b(?:would|does|could|can) [^?.!]{1,180}\b(?:count|qualify|fit|work|be acceptable)\b[^?.!]{0,50}\b(?:this|the) (?:interview|study)\b",
+        r"\bis it (?:all right|alright|ok|okay|acceptable) to (?:talk about|describe|discuss|use)\b",
         r"\b(?:would|does|could) (?:a|an|my|this|that) [^?.!]{0,100}\b(?:example|situation|task|problem|case)\b[^?.!]{0,30}\b(?:fit|count|qualify)\b",
         r"\bis (?:that|this|it) (?:a |an )?(?:suitable|acceptable|valid|relevant) (?:example|case|topic|situation)\b",
         r"\b(?:is it (?:ok|okay) if i|can i|could i|may i) (?:describe|discuss|talk about|use)\b",
@@ -5522,7 +5524,8 @@ class TextStructuredController:
                 and index in self._question_indices_asked
                 and self._questions[index].get("phase") == "closing"
                 and classify_participant_turn(participant_text, self._language) == "answer"
-                and str(text or "").strip() == self.closing_message):
+                and "?" not in str(text or "")
+                and str(text or "").strip().endswith(self.closing_message)):
             # A complete canonical goodbye is a closing even if the model
             # omitted its hidden metadata. Otherwise the UI can wait forever.
             decision = TurnDecision(action="close")

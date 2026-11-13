@@ -4218,6 +4218,9 @@ class TestEvidenceProvenanceLedger:
 
 @pytest.mark.parametrize('question', [
     'Would a visual design example fit, or do you need code?',
+    'Would an animation I designed for a landing page count for this interview?',
+    'Is it all right to talk about a visual prototype instead of code?',
+    'Would a backend database migration with no user interface count for this study?',
     'Does a Figma layout problem qualify even though I did not implement it?',
     'The issue was making an animation for a website. I never edited code in that attempt. Is that a suitable example?',
 ])
@@ -4255,12 +4258,13 @@ def test_optional_closing_uses_one_followup_then_finishes_even_without_marker():
     assert review.closed
 
 
-def test_canonical_goodbye_finishes_without_metadata_or_budget_nudge():
+@pytest.mark.parametrize('prefix', ['', 'You also mentioned CSS nesting. '])
+def test_canonical_goodbye_finishes_without_metadata_or_budget_nudge(prefix):
     guide = {'orchestration_profile': 'exploratory', 'questions': [
         {'id': 'closing', 'phase': 'closing', 'text': 'Anything else?',
          'max_follow_ups': 1, 'probes': ['What happened?']}],
         'closing_message': 'Thank you. This completes the interview.'}
     c = TextStructuredController(guide)
     c.review_turn('Anything else?', 1, TurnDecision(action='main', question=1, intent='closing:main'), '')
-    review = c.review_turn(guide['closing_message'], None, None, 'Nothing more to add today.')
+    review = c.review_turn(prefix + guide['closing_message'], None, None, 'Nothing more to add today.')
     assert review.closed
