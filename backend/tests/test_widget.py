@@ -17,6 +17,22 @@ from app.research.participant_feedback import participant_feedback_token
 
 
 class TestWidgetEndpoint:
+    async def test_screener_widget_never_exposes_payment_codes(self, client: AsyncClient):
+        study = (await client.post("/api/studies", json={
+            "title": "Private screener",
+            "research_spec": {"frontend_screening": {
+                "external_study_id": "a" * 24,
+                "interview_widget_key": "interview_widget_123",
+                "screened_out_completion_url": "https://app.prolific.com/submissions/complete?cc=SECRET50",
+            }, "fielding": {"completion_url": "https://app.prolific.com/submissions/complete?cc=FULLCODE"}},
+        })).json()
+        agent = (await client.post(f"/api/studies/{study['id']}/agents", json={
+            "name": "Screener", "status": "active",
+        })).json()
+        response = await client.get(f"/api/widget/{agent['widget_key']}")
+        assert response.status_code == 404
+        assert "SECRET50" not in response.text
+
     async def test_widget_config_valid_key(self, client: AsyncClient):
         """Create a study + active agent, then fetch its widget config."""
         # Create study

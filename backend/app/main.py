@@ -148,6 +148,11 @@ async def widget_config(widget_key: str, db: AsyncSession = Depends(get_db)):
 
     study = await db.get(Study, agent.study_id)
     research_spec = study.research_spec if study else None
+    if (research_spec or {}).get("frontend_screening"):
+        # The screener uses its own form. Its widget configuration would expose
+        # Prolific completion URLs, including the paid screen-out code.
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Interview widget unavailable")
 
     _interview_mode = (
         agent.interview_mode.value
