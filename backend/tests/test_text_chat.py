@@ -26,7 +26,7 @@ def test_work_scope_question_routes_design_led_coding_clarification():
     from app.api.text_chat import _work_scope_question
 
     assert _work_scope_question(
-        "Is it okay if I describe a design situation, or must it be a dev situation?"
+        "Is it ok If I describe a design situation that I recently had trouble with or must it be a dev situation?"
     )
     assert not _work_scope_question("I adjusted the design of the menu at 768px.")
 

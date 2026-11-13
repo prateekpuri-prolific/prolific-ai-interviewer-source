@@ -362,6 +362,12 @@ _EXPLICIT_STOP_RE = re.compile(
     r"\bi(?:'m| am) (?:finished|done) with (?:this |the )?(?:interview|session)\b",
     re.IGNORECASE,
 )
+_NO_ADDITIONAL_EXAMPLE_RE = re.compile(
+    r"(?:no|nope|not really|none|nothing else|nothing comes to mind|"
+    r"i (?:can't|cannot|don't|do not) think of (?:another|one|anything else)|"
+    r"no(?:,? (?:that's|that is) (?:it|all))?)\s*[.!]?",
+    re.IGNORECASE,
+)
 _INCOMPLETE_END_RE = re.compile(
     r"(?:\.{2,}|\b(?:and|but|because|so|when|that|if|to|the|a|an|my|i)[.!]?)$",
     re.IGNORECASE,
@@ -5489,6 +5495,26 @@ class TextStructuredController:
         authoritative_evidence: bool = False,
     ) -> TurnReview:
         """Validate the model's proposed turn and replace semantic repeats."""
+        index = self.current_question_index
+        if (
+            0 <= index < len(self._questions)
+            and index in self._question_indices_asked
+            and self._questions[index].get("id") == "closing"
+            and self._questions[index].get("phase") == "closing"
+            and _NO_ADDITIONAL_EXAMPLE_RE.fullmatch(str(participant_text or "").strip())
+        ):
+            self._closed = True
+            self.current_question_index = len(self._questions)
+            self._nudge_pending = False
+            return TurnReview(
+                text=self.closing_message,
+                marker=None,
+                decision=TurnDecision(action="close"),
+                replaced=True,
+                reason="optional_second_example_declined",
+                question_index=len(self._questions),
+                closed=True,
+            )
         if not self._allow_follow_ups and not self._skip_answered_questions:
             if decision is not None and decision.not_applicable_question is not None:
                 conditional_review = self._evidence.review(

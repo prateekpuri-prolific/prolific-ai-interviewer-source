@@ -250,15 +250,25 @@ def test_problem_episode_gate_repairs_then_accepts_matching_example():
 
 
 def test_closing_invitation_accepts_no_second_failure():
-    from app.pipeline.interview_guide import question_answer_requirement
-
-    closing = {
-        "id": "closing",
-        "phase": "closing",
-        "text": "Is there another frontend task where AI falls short?",
-        "purpose": "Capture a second lead without diluting the focal failure.",
+    guide = {
+        "questions": [{"id": "closing", "phase": "closing",
+                       "text": "Is there another frontend task where AI falls short?",
+                       "evidence_goal": ["Another task or none"],
+                       "max_follow_ups": 0}],
+        "closing_message": "Thank you. This completes the interview.",
     }
-    assert question_answer_requirement(closing) == "any"
+    for answer in ("no", "Nope.", "Nothing else", "I can't think of another"):
+        controller = TextStructuredController(guide)
+        controller.review_turn(guide["questions"][0]["text"], 1,
+                               TurnDecision(action="main", question=1, intent="closing:main"),
+                               "")
+        review = controller.review_turn(
+            "It sounds like that task mostly worked. Was there something else?",
+            None, None, answer,
+        )
+        assert review.closed
+        assert review.text == guide["closing_message"]
+        assert review.reason == "optional_second_example_declined"
 
 
 def test_withheld_answer_advances_without_reasking():

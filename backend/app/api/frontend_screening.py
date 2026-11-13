@@ -160,7 +160,7 @@ async def form(widget: str, PROLIFIC_PID: str = "", STUDY_ID: str = "", SESSION_
 <fieldset><legend>1. Which best describes your main professional work?</legend>''' + professions + '''</fieldset>
 <fieldset><legend>2. For how many years have you personally built or implemented frontend user interfaces as part of your work?</legend><label><input type="radio" name="ui_experience" value="under_one" required> Less than 1 year</label><label><input type="radio" name="ui_experience" value="one_two"> 1–2 years</label><label><input type="radio" name="ui_experience" value="three_five"> 3–5 years</label><label><input type="radio" name="ui_experience" value="six_plus"> 6 or more years</label></fieldset>
 <fieldset><legend>3. In the last three months, have you personally written or edited frontend code for a shipped or release-ready user interface?</legend><label><input type="radio" name="hands_on_code" value="yes" required> Yes</label><label><input type="radio" name="hands_on_code" value="no"> No</label></fieldset>
-<fieldset><legend>4. In the last three months, have you used AI to help implement or debug frontend UI work that you personally did?</legend><label><input type="radio" name="ai_for_frontend" value="yes" required> Yes</label><label><input type="radio" name="ai_for_frontend" value="no"> No</label></fieldset>
+<fieldset><legend>4. In the last three months, have you used AI while designing or implementing frontend UI work that you personally did?</legend><label><input type="radio" name="ai_for_frontend" value="yes" required> Yes</label><label><input type="radio" name="ai_for_frontend" value="no"> No</label></fieldset>
 <fieldset><legend>5. Which AI tools have you used for that work? Select all that apply.</legend>''' + tools + '''</fieldset>
 <fieldset><legend>6. How often does your frontend work involve judging visual or interaction quality, such as layout, typography, motion, brand fit, or overall feel?</legend><label><input type="radio" name="visual_judgment" value="often" required> Often</label><label><input type="radio" name="visual_judgment" value="sometimes"> Sometimes</label><label><input type="radio" name="visual_judgment" value="rarely_never"> Rarely or never</label></fieldset>
 <fieldset><legend>7. Are you ready to discuss a specific recent challenge where AI missed the visual, interaction, or aesthetic intent of that frontend work?</legend><label><input type="radio" name="challenge_ready" value="yes" required> Yes</label><label><input type="radio" name="challenge_ready" value="no"> No</label></fieldset>
@@ -234,7 +234,7 @@ async def submit(widget: str, answer: FrontendScreeningAnswer, db: AsyncSession 
         ("Which best describes your main professional work?", PROFESSIONS[answer.profession]),
         ("For how many years have you personally built frontend user interfaces?", answer.ui_experience),
         ("Have you personally written or edited frontend UI code in the last three months?", answer.hands_on_code),
-        ("Have you used AI for your frontend UI implementation or debugging work in the last three months?", answer.ai_for_frontend),
+        ("Have you used AI for your frontend UI design or implementation work in the last three months?", answer.ai_for_frontend),
         ("Which AI tools have you used for that work?", ", ".join(TOOLS[x] for x in answer.ai_tools)),
         ("How often do you judge visual or interaction quality in that work?", answer.visual_judgment),
         ("Are you ready to discuss a specific recent AI challenge in that work?", answer.challenge_ready),

@@ -1386,10 +1386,10 @@ async def text_chat_ws(
             if (work_privacy_profile and structured_controller is not None
                     and _work_scope_question(user_text)):
                 scope_reply = (
-                    "Yes. A design-led UI task fits if you personally wrote or edited "
-                    "frontend code for it and used AI in that attempt. A design-only "
-                    "artifact without implementation is outside this interview. "
-                    "Please continue with the example you have in mind."
+                    "Yes. A design situation is welcome if it involved a frontend "
+                    "interface and AI missed the visual or interaction result you "
+                    "wanted. That particular example does not have to be a coding "
+                    "failure. What situation did you have in mind?"
                 )
                 messages.append({"role": "user", "content": user_text})
                 messages.append({"role": "assistant", "content": scope_reply})
