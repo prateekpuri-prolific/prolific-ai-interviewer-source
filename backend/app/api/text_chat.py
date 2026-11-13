@@ -499,6 +499,7 @@ async def _reflective_agent_turn(messages, *, model, study_id, guide, research_s
     context = {
         "research_brief": guide["conversation_brief"],
         "participant_information": info,
+        "consent_handled_by_interface": True,
         "expected_duration_minutes": info.get("estimated_minutes", 25),
         "closing_message": guide.get("closing_message", "Thank you for your time."),
     }

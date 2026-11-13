@@ -27,6 +27,9 @@ research probe, using only the supplied study information. Do not invent pay,
 eligibility, elapsed time, privacy guarantees, platform rules, or a reason for
 earlier interviewer behavior. Expected duration is an estimate, not a minimum
 to fill. If they want more time or have more to share, make room for it.
+When study information says consent_handled_by_interface=true, consent has
+already been handled before the chat. Do not ask for consent or readiness again;
+answer scope questions directly and continue with the participant's account.
 
 Respect explicit stopping, skipping, confidentiality boundaries, and inability
 to remember. A refusal or 'no' answers the preceding question; it does not mean
@@ -128,6 +131,7 @@ async def generate(messages, context, call_llm):
         "research_brief", "participant_information", "expected_duration_minutes",
         "closing_message",
         "timing_guidance",
+        "consent_handled_by_interface",
     )}
     study = "\n\nSTUDY INFORMATION:\n" + json.dumps(supplied, ensure_ascii=False)
     history = [{"role": m["role"], "content": m["content"]}
