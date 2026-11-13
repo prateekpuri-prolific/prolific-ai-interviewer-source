@@ -946,6 +946,36 @@ async def text_chat_ws(
                 return
             participant_id = pid.strip()
 
+        required_screener_agent_id = (research_spec or {}).get("required_screener_agent_id")
+        if required_screener_agent_id:
+            if not participant_id or not external_study_id or not external_session_id:
+                await websocket.send_json({
+                    "type": "error",
+                    "text": "Please open this interview through the Prolific questionnaire.",
+                })
+                await websocket.close(code=4003, reason="Screening required")
+                return
+            screened = (await db.execute(select(Session).where(
+                Session.agent_id == uuid.UUID(str(required_screener_agent_id)),
+                Session.participant_id == participant_id,
+                Session.external_study_id == external_study_id,
+                Session.external_session_id == external_session_id,
+                Session.status == SessionStatus.COMPLETED,
+            ))).scalar_one_or_none()
+            if not screened or not ((screened.completion_metadata or {}).get("screening") or {}).get("eligible"):
+                await websocket.send_json({
+                    "type": "error",
+                    "text": "This interview requires a completed, eligible Prolific questionnaire.",
+                })
+                await websocket.close(code=4003, reason="Not screened in")
+                return
+            participant_context = {
+                "frontend_screening": {
+                    key: value for key, value in screened.completion_metadata["screening"].items()
+                    if key in {"profession", "hands_on_code", "ai_for_frontend", "ai_tools", "challenge_ready"}
+                }
+            }
+
         # Adaptation can affect this chat only when engagement is on, the
         # policy has rules, and the mode is live.
         _policy = agent_cfg.get("adaptive_policy") or {}

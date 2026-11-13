@@ -120,6 +120,12 @@ class ChatbotScreeningConfig(BaseModel):
     other_completion_url: str = Field(..., pattern=r"^https://app\.prolific\.com/submissions/complete\?cc=[A-Za-z0-9]+$")
 
 
+class FrontendScreeningConfig(BaseModel):
+    external_study_id: str = Field(..., pattern=r"^[a-f0-9]{24}$")
+    interview_widget_key: str = Field(..., min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    screened_out_completion_url: str = Field(..., pattern=r"^https://app\.prolific\.com/submissions/complete\?cc=[A-Za-z0-9]+$")
+
+
 class ResearchSpec(BaseModel):
     """Versioned study design, independent of any one interview agent."""
 
@@ -150,6 +156,8 @@ class ResearchSpec(BaseModel):
     # Persisted for analysis, but deliberately excluded from the live prompt.
     analysis_notes: str = Field("", max_length=10000)
     chatbot_screening: ChatbotScreeningConfig | None = None
+    frontend_screening: FrontendScreeningConfig | None = None
+    required_screener_agent_id: UUID | None = None
 
 
 # ── Request Schemas ──────────────────────────────────────────

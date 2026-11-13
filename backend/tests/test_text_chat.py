@@ -190,6 +190,40 @@ class _SyntheticParticipantSocket:
 
 
 @pytest.mark.asyncio
+async def test_frontend_interview_rejects_unscreened_submission(
+    monkeypatch, db_session_factory, make_study, make_agent
+):
+    import uuid
+    import app.api.text_chat as text_chat
+    from app.models.study import StudyStatus
+
+    study = make_study(title="Gated frontend interview", status=StudyStatus.ACTIVE)
+    study.research_spec = {
+        "version": "frontend-ai-failures-v0.7",
+        "fielding": {"recruitment_source": "prolific"},
+        "required_screener_agent_id": str(uuid.uuid4()),
+    }
+    agent = make_agent(study_id=study.id)
+    from app.models.agent import ParticipantIdMode
+    agent.participant_id_mode = ParticipantIdMode.EXTERNAL
+    async with db_session_factory() as db:
+        db.add_all([study, agent])
+        await db.commit()
+    monkeypatch.setattr(text_chat, "async_session_factory", db_session_factory)
+    monkeypatch.setattr(text_chat, "validate_agent_pipeline_config", AsyncMock(return_value=[]))
+    socket = _SyntheticParticipantSocket([])
+    await text_chat.text_chat_ws(
+        socket, agent.widget_key, pid="b" * 24,
+        external_study_id="a" * 24, external_session_id="c" * 24,
+        consent=True,
+    )
+    assert socket.closed == {"code": 4003, "reason": "Not screened in"}
+    assert any("eligible Prolific questionnaire" in x.get("text", "") for x in socket.sent)
+    async with db_session_factory() as db:
+        assert not (await db.execute(select(Session))).scalars().all()
+
+
+@pytest.mark.asyncio
 async def test_structured_closing_without_turn_marker_sends_ended_event(
     monkeypatch, db_session_factory, make_study, make_agent
 ):
