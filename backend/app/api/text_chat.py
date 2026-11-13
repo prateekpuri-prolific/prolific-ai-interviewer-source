@@ -498,6 +498,9 @@ async def _reflective_agent_turn(messages, *, model, study_id, guide, research_s
     info = participant_information(research_spec) or {}
     context = {
         "research_brief": guide["conversation_brief"],
+        "discussion_guide": [{key: question.get(key) for key in
+                              ("id", "text", "purpose", "evidence_goal", "probes", "priority")}
+                             for question in guide.get("questions", [])],
         "participant_information": info,
         "consent_handled_by_interface": True,
         "expected_duration_minutes": info.get("estimated_minutes", 25),

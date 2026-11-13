@@ -101,6 +101,9 @@ async def test_timing_is_server_context_not_participant_speech(monkeypatch,remai
     assert llm.await_args_list[0].args[0][-1]=={'role':'user','content':'The spacing changed.'}
     assert 'legacy scripted agenda' not in str(llm.await_args_list)
     assert '"consent_handled_by_interface": true' in llm.await_args_list[0].args[0][0]['content']
+    for call in llm.await_args_list:
+        assert '"discussion_guide"' in call.args[0][0]['content']
+        assert GUIDE['questions'][0]['text'] in call.args[0][0]['content']
     assert result['prompt_tokens']==20 and result['completion_tokens']==10
 
 
