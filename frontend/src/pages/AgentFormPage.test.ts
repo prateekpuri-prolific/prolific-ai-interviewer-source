@@ -31,3 +31,12 @@ it("preserves contextual policy and depth budget through agent form defaults", (
   expect(guide.conversation_policy).toBe("contextual_v1");
   expect(guide.conversation_follow_up_budget).toBe(8);
 });
+
+it("preserves the reflective policy and research brief through form defaults", () => {
+  const guide = withGuideDefaults({
+    questions: [], orchestration_profile: "exploratory",
+    conversation_policy: "reflective_v1", conversation_brief: "Understand a concrete UI failure.",
+  });
+  expect(guide.conversation_policy).toBe("reflective_v1");
+  expect(guide.conversation_brief).toBe("Understand a concrete UI failure.");
+});

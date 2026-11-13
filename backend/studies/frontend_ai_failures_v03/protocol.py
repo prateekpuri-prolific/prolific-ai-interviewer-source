@@ -2,6 +2,21 @@
 from copy import deepcopy
 
 
+def reflective(config: dict, brief: str) -> dict:
+    """Opt this frontend study into the evaluated draft/critique policy."""
+    config = deepcopy(config)
+    study, agent = config['study'], config['agent']
+    study['research_spec']['version'] = 'frontend-ai-failures-v0.10.0'
+    agent['name'] = 'Frontend AI interviewer — reflective v0.10.0'
+    agent['system_prompt'] = brief
+    agent['interview_guide'].update(conversation_policy='reflective_v1',
+                                    conversation_brief=brief)
+    agent['widget_show_progress'] = False
+    # Match the participant-facing estimate; the server keeps a grace period.
+    agent['max_duration_seconds'] = 25 * 60
+    return config
+
+
 def revise(config: dict, revision: int = 1) -> dict:
     config = deepcopy(config)
     study, agent = config['study'], config['agent']

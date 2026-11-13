@@ -131,7 +131,8 @@ class InterviewGuide(BaseModel):
         min_length=1,
         description="Ordered list of interview questions",
     )
-    conversation_policy: Literal["contextual_v1"] | None = None
+    conversation_policy: Literal["contextual_v1", "reflective_v1"] | None = None
+    conversation_brief: str | None = Field(None, max_length=10000)
     conversation_follow_up_budget: int = Field(10, ge=0, le=30)
     orchestration_profile: Literal[
         "fixed", "repair_only", "semi_structured", "exploratory"
@@ -195,6 +196,8 @@ class InterviewGuide(BaseModel):
 
     @model_validator(mode="after")
     def _validate_protocol_structure(self) -> "InterviewGuide":
+        if self.conversation_policy == "reflective_v1" and not (self.conversation_brief or "").strip():
+            raise ValueError("reflective_v1 requires a conversation_brief")
         if self.conversation_policy and self.orchestration_profile != "exploratory":
             raise ValueError("contextual_v1 requires the exploratory profile")
         if self.conversation_policy and any(not question.id for question in self.questions):

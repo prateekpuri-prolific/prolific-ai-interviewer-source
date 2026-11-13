@@ -214,7 +214,8 @@ export interface InterviewQuestionConfig {
 }
 
 export interface InterviewGuideConfig {
-  conversation_policy?: "contextual_v1" | null;
+  conversation_policy?: "contextual_v1" | "reflective_v1" | null;
+  conversation_brief?: string | null;
   conversation_follow_up_budget?: number;
   questions: InterviewQuestionConfig[];
   orchestration_profile?: "fixed" | "repair_only" | "semi_structured" | "exploratory" | null;

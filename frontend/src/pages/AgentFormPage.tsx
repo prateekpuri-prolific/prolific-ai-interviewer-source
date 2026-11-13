@@ -65,7 +65,8 @@ type OrchestrationProfile = "fixed" | "repair_only" | "semi_structured" | "explo
 interface InterviewGuide {
   questions: InterviewQuestion[];
   orchestration_profile: OrchestrationProfile;
-  conversation_policy?: "contextual_v1" | null;
+  conversation_policy?: "contextual_v1" | "reflective_v1" | null;
+  conversation_brief?: string | null;
   conversation_follow_up_budget?: number;
   closing_message: string;
   allow_follow_ups: boolean;
@@ -325,7 +326,8 @@ function parseGuideJSON(content: string): InterviewGuide {
 
   const rawGuide: Partial<InterviewGuide> = {
     ...obj,
-    conversation_policy: obj.conversation_policy === "contextual_v1" ? "contextual_v1" : null,
+    conversation_policy: obj.conversation_policy === "contextual_v1" || obj.conversation_policy === "reflective_v1" ? obj.conversation_policy : null,
+    conversation_brief: typeof obj.conversation_brief === "string" ? obj.conversation_brief : null,
     conversation_follow_up_budget: typeof obj.conversation_follow_up_budget === "number" ? obj.conversation_follow_up_budget : undefined,
     questions,
     closing_message:

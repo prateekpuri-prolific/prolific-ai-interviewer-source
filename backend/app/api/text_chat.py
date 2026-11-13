@@ -491,6 +491,59 @@ async def _judge_structured_turn(
         }
 
 
+async def _reflective_agent_turn(messages, *, model, study_id, guide, research_spec, remaining_seconds):
+    """Deliver C's selected reply directly, without the legacy coverage controller."""
+    from app.pipeline.reflective_interview import generate
+
+    info = participant_information(research_spec) or {}
+    context = {
+        "research_brief": guide["conversation_brief"],
+        "participant_information": info,
+        "expected_duration_minutes": info.get("estimated_minutes", 25),
+        "closing_message": guide.get("closing_message", "Thank you for your time."),
+    }
+    if remaining_seconds <= 0:
+        context["timing_guidance"] = (
+            "The planned interview time has elapsed. Respond to the participant's "
+            "current question or contribution and wrap up without opening a new topic. "
+            "Do not ignore a participant question to deliver a canned goodbye."
+        )
+    elif remaining_seconds <= 60:
+        context["timing_guidance"] = (
+            "About one minute remains in the planned interview. If useful, ask one "
+            "final focused question and signal that it is the final one. If a final "
+            "question has already been answered, wrap up. Honor participant questions."
+        )
+    elif remaining_seconds <= 180:
+        context["timing_guidance"] = "Prioritize the most useful unresolved detail; keep remaining turns concise."
+    visible = [{"role": m["role"], "content": m["content"]} for m in messages
+               if m["role"] in {"user", "assistant"}]
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    calls = 0
+    started = time.monotonic()
+
+    async def call_llm(prompt):
+        nonlocal calls
+        calls += 1
+        result = await asyncio.wait_for(_call_llm(prompt, model=model, study_id=study_id), timeout=40)
+        for key in usage:
+            usage[key] += int(result.get(key, 0) or 0)
+        return result["content"]
+
+    # An output-format repair reuses the saved answer, never asks the person to
+    # repeat it, and is bounded to one retry. No quality-based resampling.
+    for attempt in range(2):
+        try:
+            selected = await generate(visible, context, call_llm)
+            return {"content": selected["reply"], "closed": selected["closed"], **usage,
+                    "telemetry": {"model_calls": calls, "format_retries": attempt,
+                                  "seconds": round(time.monotonic()-started, 3),
+                                  "selected_id": selected["trace"]["selection"]["selected_id"]}}
+        except ValueError:
+            if attempt:
+                raise
+
+
 async def _contextual_agent_turn(controller, messages, *, model, study_id, participant_text):
     """Generate, semantically check and repair once before delivering a turn."""
     from app.pipeline.conversation_policy import ConversationRepair, check_question
@@ -1053,9 +1106,14 @@ async def text_chat_ws(
         agent_cfg["research_spec"],
         participant_context,
     )
+    is_reflective = bool(
+        agent_cfg["interview_mode"] == "structured"
+        and (agent_cfg["interview_guide"] or {}).get("conversation_policy") == "reflective_v1"
+    )
     is_structured = bool(
         agent_cfg["interview_mode"] == "structured"
         and agent_cfg["interview_guide"]
+        and not is_reflective
     )
     # Progress bar: only meaningful for structured chats with the toggle on.
     show_progress = bool(is_structured and agent_cfg["widget_show_progress"])
@@ -1104,6 +1162,7 @@ async def text_chat_ws(
     evidence_judge_candidates = 0
     evidence_judge_returned = 0
     privacy_redaction_counts: Counter[str] = Counter()
+    reflective_turns: list[dict] = []
 
     # ── Engagement metrics (text profile; observational, lexical + timing) ──
     engagement_scorer = None
@@ -1121,7 +1180,7 @@ async def text_chat_ws(
         engagement_detector = EventDetector(_eng_cfg)
         logger.info(f"Engagement tracking enabled for text session {session_id}")
 
-        if agent_cfg["adaptive_enabled"]:
+        if agent_cfg["adaptive_enabled"] and not is_reflective:
             from app.engagement.adaptive import AdaptivePolicy, AdaptivePolicyEngine
 
             _policy_obj = AdaptivePolicy.from_dict(agent_cfg["adaptive_policy"])
@@ -1670,7 +1729,7 @@ async def text_chat_ws(
                 datetime.now(timezone.utc) - start_time
             ).total_seconds()
             participant_kind_for_timing = kind_for_turn
-            timing_turn_is_answer = participant_kind_for_timing not in {
+            timing_turn_is_answer = not is_reflective and participant_kind_for_timing not in {
                 "procedural",
                 "flow_repair",
                 "clarification",
@@ -1759,7 +1818,8 @@ async def text_chat_ws(
             # Start compressing optional material before the target, without
             # mentioning the clock or interrupting conversational momentum.
             elif (
-                elapsed_after_answer >= timing.prioritize_at_seconds
+                not is_reflective
+                and elapsed_after_answer >= timing.prioritize_at_seconds
                 and not prioritization_injected
             ):
                 messages.append({
@@ -1779,7 +1839,15 @@ async def text_chat_ws(
                 await websocket.send_json({"type": "typing"})
 
                 contextual_review = None
-                if isinstance(structured_controller, ContextualInterviewController):
+                if is_reflective:
+                    llm_result = await _reflective_agent_turn(
+                        messages, model=agent_cfg["llm_model"], study_id=agent_cfg["study_id"],
+                        guide=agent_cfg["interview_guide"], research_spec=agent_cfg["research_spec"],
+                        remaining_seconds=timing.target_seconds-elapsed_after_answer,
+                    )
+                    reflective_turns.append({"sequence": sequence + 1, **llm_result["telemetry"],
+                                             "closed": llm_result["closed"]})
+                elif isinstance(structured_controller, ContextualInterviewController):
                     llm_result, contextual_review = await _contextual_agent_turn(
                         structured_controller, messages, model=agent_cfg["llm_model"],
                         study_id=agent_cfg["study_id"], participant_text=user_text,
@@ -1792,7 +1860,7 @@ async def text_chat_ws(
 
                 display_text = agent_text
                 context_text = agent_text
-                turn_closed = False
+                turn_closed = bool(llm_result.get("closed")) if is_reflective else False
 
                 if structured_controller is not None:
                     from app.pipeline.interview_guide import (
@@ -1941,6 +2009,11 @@ async def text_chat_ws(
         keepalive_stop.set()
         keepalive_task.cancel()
         protocol_metadata = None
+        if is_reflective:
+            protocol_metadata = {"channel": "text", "conversation_policy": "reflective_v1",
+                                 "turn_events": reflective_turns,
+                                 "model_calls": sum(t["model_calls"] for t in reflective_turns),
+                                 "format_retries": sum(t["format_retries"] for t in reflective_turns)}
         if structured_controller is not None:
             protocol_metadata = {
                 **structured_controller.stats(),
