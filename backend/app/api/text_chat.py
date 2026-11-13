@@ -14,6 +14,7 @@ This endpoint:
 
 import asyncio
 import json
+import re
 import secrets
 import time
 import uuid
@@ -44,6 +45,7 @@ from app.privacy import (
     PRIVACY_WARNING,
     redact_session_data,
     redact_text,
+    redact_work_text,
     redact_text_with_llm,
 )
 from app.research.protocol import (
@@ -78,6 +80,31 @@ _PARTICIPANT_EXPERIENCE_EVENTS = {
 
 # OpenAI EU regional API (mirrors app.pipeline.runner)
 _OPENAI_EU_BASE_URL = "https://eu.api.openai.com/v1"
+
+_EXPLICIT_NO_FAILURE = re.compile(
+    r"\b(?:there (?:was|is) no (?:clear |actual |real )?(?:failure|problem|issue)|"
+    r"no (?:clear |actual |real )?(?:ai )?(?:failure|problem|issue)(?: comes to mind)?|"
+    r"i (?:can't|cannot|don't|do not) (?:recall|remember|think of) "
+    r"(?:a |any |one )?(?:clear |specific )?(?:failure|problem|issue|example))\b",
+    re.I,
+)
+
+
+def _explicit_no_failure(text: str) -> bool:
+    return bool(_EXPLICIT_NO_FAILURE.search(text)) and not bool(
+        re.search(r"\b(?:but|except|however)\b", text, re.I)
+    )
+
+
+def _work_scope_question(text: str) -> bool:
+    return (
+        "?" in text
+        and bool(re.search(r"\b(?:design|designer|ui|ux)\b", text, re.I))
+        and bool(re.search(
+            r"\b(?:count|okay|ok|acceptable|allowed|must|can i|does it)\b",
+            text, re.I,
+        ))
+    )
 
 
 async def _get_key(field: str) -> str:
@@ -859,6 +886,7 @@ async def text_chat_ws(
             "widget_show_progress": bool(agent.widget_show_progress),
             "research_spec": research_spec,
         }
+        work_privacy_profile = (research_spec or {}).get("privacy_profile") == "work_high_risk"
 
         # ── 2. Resolve participant_id ─────────────────────────────
         participant_id: str | None = None
@@ -1247,7 +1275,8 @@ async def text_chat_ws(
             if msg.get("type") == "finish":
                 final_text = str(msg.get("text") or "").strip()
                 if final_text:
-                    redaction = await _redact_participant_text(final_text)
+                    redaction = (redact_work_text(final_text) if work_privacy_profile
+                                 else await _redact_participant_text(final_text))
                     final_text = redaction.text
                     privacy_redaction_counts.update(redaction.counts)
                     sequence += 1
@@ -1260,7 +1289,7 @@ async def text_chat_ws(
                         "content": final_text,
                         "sequence": sequence,
                     })
-                    if redaction.detected:
+                    if redaction.detected and not work_privacy_profile:
                         await _send_privacy_warning(websocket)
                 await websocket.send_json({
                     "type": "ended",
@@ -1277,7 +1306,8 @@ async def text_chat_ws(
             if msg.get("type") not in {"message", "addendum"} or not msg.get("text", "").strip():
                 continue
 
-            redaction = await _redact_participant_text(msg["text"].strip())
+            redaction = (redact_work_text(msg["text"].strip()) if work_privacy_profile
+                         else await _redact_participant_text(msg["text"].strip()))
             user_text = redaction.text
             privacy_redaction_counts.update(redaction.counts)
 
@@ -1291,7 +1321,7 @@ async def text_chat_ws(
                 "sequence": sequence,
             })
 
-            if redaction.detected:
+            if redaction.detected and not work_privacy_profile:
                 await _send_privacy_warning(websocket)
 
             if user_text in {
@@ -1299,20 +1329,66 @@ async def text_chat_ws(
                 "[POTENTIALLY_IDENTIFYING_CONTEXT_REMOVED]",
                 "[PRIVACY_CHECK_UNAVAILABLE]",
             }:
-                # A withheld answer provides no research evidence. Keep the
-                # current question rather than praising it or advancing the guide.
-                redirect = (
-                    "Please keep your answer general, without personal medical or identifying details. "
-                    "You can also skip. " + (structured_controller.current_prompt_text if structured_controller else
-                    "Could you answer the previous question in general terms?")
+                # A withheld answer cannot be used as evidence. Do not ask the
+                # participant to repeat it or restate the same question.
+                next_prompt = (
+                    structured_controller.advance_after_withheld_answer()
+                    if structured_controller is not None and isinstance(structured_controller, TextStructuredController)
+                    else "You can share anything else you want me to understand."
                 )
+                redirect = f"I couldn't use that answer. {next_prompt}"
                 messages.append({"role": "user", "content": user_text})
                 messages.append({"role": "assistant", "content": redirect})
                 sequence = await _send_scripted_agent_turn(
                     websocket, session_id, redirect, sequence
                 )
                 agent_sent_at = time.monotonic()
+                if structured_controller is not None and structured_controller.is_finished:
+                    await websocket.send_json({
+                        "type": "ended", "reason": "completed",
+                        "text": "Thank you for your participation.",
+                    })
+                    final_status = SessionStatus.COMPLETED
+                    final_reason = "completed"
+                    break
                 continue
+
+            if (work_privacy_profile and structured_controller is not None
+                    and _work_scope_question(user_text)):
+                scope_reply = (
+                    "Yes. A design-led UI task fits if you personally wrote or edited "
+                    "frontend code for it and used AI in that attempt. A design-only "
+                    "artifact without implementation is outside this interview. "
+                    "Please continue with the example you have in mind."
+                )
+                messages.append({"role": "user", "content": user_text})
+                messages.append({"role": "assistant", "content": scope_reply})
+                sequence = await _send_scripted_agent_turn(
+                    websocket, session_id, scope_reply, sequence
+                )
+                agent_sent_at = time.monotonic()
+                continue
+
+            if (work_privacy_profile
+                    and structured_controller is not None
+                    and isinstance(structured_controller, TextStructuredController)
+                    and 0 <= structured_controller.current_question_index < len(runtime_guide["questions"])
+                    and runtime_guide["questions"][structured_controller.current_question_index].get("id")
+                    in {"focal_episode", "failure_location"}
+                    and _explicit_no_failure(user_text)):
+                closing = "Thanks for being clear. That completes the interview."
+                messages.append({"role": "user", "content": user_text})
+                messages.append({"role": "assistant", "content": closing})
+                sequence = await _send_scripted_agent_turn(
+                    websocket, session_id, closing, sequence
+                )
+                await websocket.send_json({
+                    "type": "ended", "reason": "no_matching_episode",
+                    "text": "Thank you for your participation.",
+                })
+                final_status = SessionStatus.COMPLETED
+                final_reason = "no_matching_episode"
+                break
 
             if engagement_scorer:
                 latency_ms = (
@@ -1906,6 +1982,7 @@ async def text_chat_ws(
                         session_id,
                         session=sess,
                         ingress_counts=privacy_redaction_counts,
+                        profile="work_high_risk" if work_privacy_profile else "standard",
                     )
                     await db.commit()
 

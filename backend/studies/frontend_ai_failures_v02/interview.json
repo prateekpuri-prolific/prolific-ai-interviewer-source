@@ -1,0 +1,922 @@
+{
+  "study": {
+    "title": "Frontend developers: where AI falls short",
+    "description": "Revised frontend task failure interview, pilot v0.6, based on the 10-person fielding review.",
+    "status": "draft",
+    "research_spec": {
+      "version": "frontend-ai-failures-v0.6",
+      "privacy_profile": "work_high_risk",
+      "stage": "pilot",
+      "method": "exploration",
+      "decision_to_inform": "Identify concrete, recurring frontend development failures worth improving or testing, with an observable definition of successful AI assistance.",
+      "research_questions": [
+        "Which frontend tasks do developers personally try to complete with AI, and what inputs and constraints do those tasks involve?",
+        "What exactly does the AI do wrong, in which state or environment, and how is the failure detected and repaired?",
+        "What deliverable, behavior, and verification checks would make AI assistance successful?",
+        "Which failures recur, and what work or AI use do they affect?"
+      ],
+      "population": {
+        "participant_role": "Adults doing hands-on frontend development who have personally tried generative AI for a frontend task.",
+        "subject": "A recent firsthand attempt to use AI for a frontend implementation or debugging task.",
+        "knowledge_relationship": "Developers describe their own tasks, observations, and acceptance checks; they do not speak for an employer or all frontend developers.",
+        "inclusion_notes": "This draft follows the first ten-person Prolific pilot. Future recruitment should require a recent firsthand AI-assisted frontend implementation or debugging attempt and personally editing UI code. Recruitment filters are self-reported and need an eligibility check before another paid wave.",
+        "knowledge_limits": [
+          "Self-reported episodes may omit context or misremember sequence.",
+          "A participant's explanation of model cause is an interpretation, not a diagnosis.",
+          "One episode does not establish prevalence or model-wide failure."
+        ],
+        "terminology_notes": "Use the developer's own terms. Frontend includes UI implementation, styling, interactions, state, accessibility, responsiveness, visual matching, and browser behavior.",
+        "accessibility_notes": "",
+        "sensitivity_notes": "Ask for concrete work details and examples. Do not request pasted confidential source materials, credentials, customer data, or personal contact information."
+      },
+      "targets": [
+        {
+          "id": "focal_episode",
+          "name": "Find a failure: focal episode",
+          "description": "Anchor the interview in one remembered firsthand episode with a bounded deliverable.",
+          "evidence_needed": [
+            "One specific AI assisted frontend attempt",
+            "Intended UI or code change",
+            "Approximate recency"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "starting_state",
+          "name": "Task and inputs: starting state",
+          "description": "Separate starting state from the requested transformation.",
+          "evidence_needed": [
+            "Existing component, page, flow, or code state",
+            "Requested change or new behavior"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "input_inventory",
+          "name": "Task and inputs: input inventory",
+          "description": "Record the full input envelope rather than treating the prompt alone as the task.",
+          "evidence_needed": [
+            "Instructions or request given",
+            "Code or repository context supplied",
+            "Design, visual, behavior, or test references supplied",
+            "Approximate scale or amount"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "tool_and_workflow",
+          "name": "Task and inputs: tool and workflow",
+          "description": "Identify the product and level of access without guessing the underlying model.",
+          "evidence_needed": [
+            "Tool or product",
+            "Mode of interaction and access",
+            "Model or version if known"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "requirements",
+          "name": "Task and inputs: requirements",
+          "description": "Capture constraints that determine correctness and which the AI knew about.",
+          "evidence_needed": [
+            "Functional behavior",
+            "Visual or design system expectations",
+            "Relevant responsive, accessibility, browser, performance, or test constraints",
+            "Which requirements the AI was told or could inspect"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "ai_actions",
+          "name": "What AI did: ai actions",
+          "description": "Recover the observable sequence from request through output.",
+          "evidence_needed": [
+            "AI action or output",
+            "Whether it edited, generated, explained, or tested",
+            "Any follow-up instruction or retry before the failure was noticed"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "failure_location",
+          "name": "Exact failure: failure location",
+          "description": "Obtain a concrete observed defect with expected versus actual behavior.",
+          "evidence_needed": [
+            "Specific location, UI state, behavior, or code path",
+            "Observed result",
+            "Expected result",
+            "Why the difference mattered"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "detection",
+          "name": "Finding and fixing it: detection",
+          "description": "Capture real verification rather than assuming a test suite caught the issue.",
+          "evidence_needed": [
+            "Detection method",
+            "Check or reproduction steps",
+            "Whether the AI's own checks caught it"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "repair",
+          "name": "Finding and fixing it: repair",
+          "description": "Record concrete correction burden and whether the attempt was abandoned.",
+          "evidence_needed": [
+            "Fix, workaround, retry, or abandonment",
+            "Number or nature of iterations",
+            "Approximate time or effort and remaining risk"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "right_result",
+          "name": "What right looks like: right result",
+          "description": "Define the desired artifact and behavior in participant terms.",
+          "evidence_needed": [
+            "Expected deliverable or code change",
+            "Correct user-visible behavior",
+            "Fit with existing app or design"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "acceptance_checks",
+          "name": "What right looks like: acceptance checks",
+          "description": "Make the success criterion observable and scorable.",
+          "evidence_needed": [
+            "Functional checks or tests",
+            "Visual, responsive, accessibility, or browser checks when relevant",
+            "Who decides acceptability",
+            "What level of remaining manual review is acceptable"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "repeatability",
+          "name": "Pattern and impact: repeatability",
+          "description": "Distinguish recurring capability gap from a single incident.",
+          "evidence_needed": [
+            "Repeat, one-off, or unknown",
+            "What varies between instances",
+            "Other tool comparison if firsthand"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        },
+        {
+          "id": "impact",
+          "name": "Pattern and impact: impact",
+          "description": "Understand practical consequence rather than inferring importance from annoyance.",
+          "evidence_needed": [
+            "Frequency or avoided work",
+            "Effect on time, quality, or confidence"
+          ],
+          "do_not_infer": [
+            "A population-wide rate or technical root cause from one account."
+          ],
+          "required": true
+        }
+      ],
+      "clarification_policy": {
+        "participant_definition": "A firsthand AI-assisted frontend implementation or debugging attempt where you personally wrote or edited UI code.",
+        "in_scope": [
+          "Design-led UI work when the participant personally implemented or debugged frontend code",
+          "Styling, interactions, accessibility, responsive behavior, and browser-visible UI states"
+        ],
+        "out_of_scope": [
+          "Standalone visual design or animation without frontend implementation",
+          "Backend-only API or infrastructure changes"
+        ],
+        "ambiguous_cases": [
+          "A design task that may also have involved changing UI code"
+        ],
+        "ambiguity_handling": "Ask whether the participant personally changed frontend code. If yes, accept the episode; otherwise invite one coding example once."
+      },
+      "interviewer_stance": {
+        "organization_label": "Prolific research team",
+        "disclosure": "An AI interviewer asks about one firsthand frontend development attempt. It does not assess the developer's skill.",
+        "boundaries": [
+          "Ask one question at a time and stay with the selected episode.",
+          "Distinguish what happened from what the participant thinks caused it.",
+          "Never blame the participant, argue that the AI was right, or offer coding advice.",
+          "Do not collect confidential materials or identifying details.",
+          "Accept skips, uncertainty, and stopping without pressure."
+        ]
+      },
+      "participant_information": {
+        "purpose_summary": "Explore specific frontend development tasks that generative AI still struggles to help with.",
+        "participation_summary": "A roughly 25-minute typed interview about one real frontend task. You will describe the task, what information the AI had, what it did wrong, how you checked or fixed it, and what a correct result would look like. You may skip any question.",
+        "estimated_minutes": 25,
+        "ai_disclosure": "An AI interviewer reads your typed answers and may ask follow-up questions. It does not evaluate you or your work.",
+        "data_handling_summary": "Your typed responses are processed by the AI interviewer. Automated checks remove clear high-risk details such as contact information, account numbers, and credentials; ordinary work descriptions remain in the transcript for research and quality review. The checks may miss some details. A session identifier supports withdrawal requests. Do not paste confidential work materials. No microphone, camera, or audio recording is used.",
+        "data_controller": "Prolific Academic Ltd, 483 Green Lanes, London N13 4BS, United Kingdom.",
+        "data_recipients_summary": "Authorised Prolific project staff may review interview transcripts. Google Cloud hosts the application and database in London; OpenAI processes typed answers for interviewing through its standard API, which may process data outside the UK. Only non-identifying aggregate findings may be shared externally; transcripts, participant-level responses, and quotations will not be shared externally during this pilot.",
+        "risks_summary": "Discussing frustrating work may be mildly uncomfortable. Do not paste confidential source materials or customer data. You may skip or stop.",
+        "benefits_summary": "There is no expected direct benefit to you.",
+        "compensation_summary": "Compensation terms, if any, are stated in the recruitment invitation. Honest participation is welcome even if you cannot recall a clear failure.",
+        "privacy_reminder": "Describe your work and the AI's failure in detail. Do not paste confidential source materials, credentials, personal contact information, or customer data.",
+        "rights": [
+          "You may skip any question.",
+          "You may stop the interview at any time.",
+          "You may say you are unsure."
+        ],
+        "consent_required": true,
+        "consent_label": "I have read the study information and agree to take part in this typed AI interview.",
+        "researcher_identity": "Prateek Puri, Prolific Academic Ltd research team",
+        "researcher_contact": "Email prateek.puri@prolific.com with the study title for research questions or a data request.",
+        "complaints_contact": "Use the contact and rights-request routes in Prolific's Privacy and Legal Notices: https://www.prolific.com/privacy-and-legal",
+        "ethics_review_reference": "",
+        "data_retention_period": "Linked interview transcripts are retained for up to six months after this research project is completed, then deleted from the application. Backups expire on a rolling seven-day schedule. Non-identifying aggregate findings may be retained longer.",
+        "withdrawal_instructions": "You may stop at any time. To request withdrawal of linked interview data, email the researcher with the study title and any session identifier you received, preferably within one month. Later data-rights requests will also be considered. Data already irreversibly combined into non-identifying aggregates cannot be removed.",
+        "privacy_notice_url": "https://www.prolific.com/privacy-and-legal"
+      },
+      "fielding": {
+        "recruitment_source": "direct_link",
+        "response_limit": 10,
+        "soft_launch_limit": 10,
+        "participant_id_parameter": "PROLIFIC_PID",
+        "require_profile": false,
+        "completion_url": "",
+        "no_consent_url": "",
+        "inactivity_url": ""
+      },
+      "analysis_notes": "Analyze one focal firsthand episode per transcript. Preserve task, existing state, intended change, every input type and missing context, tool access, requirements, observed AI actions, exact expected-versus-actual failure, reproduction state, detection, correction burden, right-result specification, acceptance checks, recurrence, and impact. Distinguish observed fact from participant causal interpretation. Secondary tasks are leads only. Do not infer prevalence or model-wide inability from this convenience sample.",
+      "chatbot_screening": null
+    }
+  },
+  "agent": {
+    "name": "Frontend AI failure interviewer",
+    "modality": "text",
+    "avatar": "neutral",
+    "system_prompt": "You are a neutral research interviewer studying firsthand frontend development attempts with generative AI. The goal is unusually precise failure evidence. Select one recent concrete episode, then stay with it. Build a clear chain: task and starting state -> all input types and missing context -> AI actions and output -> one exact observed defect with expected versus actual behavior -> how it was detected and repaired -> what a correct result and acceptance checks would be. Ask one question at a time. Follow the structured guide, but use the participant's earlier answers to skip covered material and ask only for missing detail. Never ask someone to repeat an answer; if a detail is uncertain or withheld, move on. Prioritize the four core questions: task, inputs, exact failure, and right result. If the selected episode has no observed AI shortcoming, do not manufacture one; invite a different firsthand attempt once, and if none exists, close. Never turn lack of trust alone into an observed error. For UI failures ask about viewport, interaction, state, and visible behavior only when relevant; for code or architecture failures ask about interface, dependency, tests, and integration only when relevant. Probe for a small illustrative example if a failure remains abstract. Distinguish observed behavior from the participant's theory of its cause; do not diagnose the model. Do not assume missing context would have fixed the issue. Accept ordinary work context. Do not request pasted confidential source material, credentials, personal contact details, or customer data. Do not troubleshoot, recommend tools, evaluate the participant, or argue with their account. If the participant cannot recall a detail, record uncertainty and move on. Accept skips, corrections, and stopping. End naturally when the focal episode is adequately covered or time is up.",
+    "welcome_message": "Hi, I'm an AI interviewer working with the Prolific research team. I'd like to understand one frontend task where AI fell short: the task, inputs, exact failure, and what a correct result would look like. This takes about 25 minutes. Please describe the work in detail, but do not paste confidential source material, credentials, personal contact information, or customer data. You can skip a question or stop at any time. Are you ready to begin?",
+    "pipeline_type": "modular",
+    "llm_model": "openai/gpt-5.6-terra",
+    "stt_provider": "",
+    "stt_model": null,
+    "tts_provider": "",
+    "tts_model": null,
+    "tts_voice": null,
+    "turn_detection": "local",
+    "language": "en",
+    "max_duration_seconds": 1800,
+    "status": "draft",
+    "participant_id_mode": "random",
+    "widget_title": "Frontend AI Failures — Developer Interview",
+    "widget_description": "A detailed typed interview about one frontend task AI struggled to complete.",
+    "widget_primary_color": "#111827",
+    "widget_listening_message": "Agent is listening…",
+    "widget_show_progress": true,
+    "interview_mode": "structured",
+    "interview_guide": {
+      "questions": [
+        {
+          "text": "Think of one recent UI implementation or debugging attempt where you personally changed frontend code with AI and needed to correct its output. What were you trying to build or change, and when did this happen? If you cannot recall one, say so.",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What would you have committed or shown when the task was finished?"
+          ],
+          "max_follow_ups": 2,
+          "transition": null,
+          "id": "focal_episode",
+          "module": "Find a failure",
+          "purpose": "Anchor the interview in one remembered firsthand episode with a bounded deliverable.",
+          "target_ids": [
+            "focal_episode"
+          ],
+          "evidence_goal": [
+            "One specific AI assisted frontend attempt",
+            "Intended UI or code change",
+            "Approximate recency"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "warm_up",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Before you asked the AI, what already existed in the app, and what had to change?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "Was this a new component, a change to existing code, a bug fix, or something else?",
+            "Which nearby pieces of the app did the change have to work with?"
+          ],
+          "max_follow_ups": 2,
+          "transition": null,
+          "id": "starting_state",
+          "module": "Task and inputs",
+          "purpose": "Separate starting state from the requested transformation.",
+          "target_ids": [
+            "starting_state"
+          ],
+          "evidence_goal": [
+            "Existing component, page, flow, or code state",
+            "Requested change or new behavior"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "focal_episode"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "What did you give the AI for this attempt? Please describe the kinds of inputs and their approximate size, without sharing the actual material.",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What did your initial request ask the AI to do?",
+            "Could it see the relevant files or repository?",
+            "Did it have a design, behavior, or test reference?",
+            "About how many files, screens, or states were involved?"
+          ],
+          "max_follow_ups": 1,
+          "transition": null,
+          "id": "input_inventory",
+          "module": "Task and inputs",
+          "purpose": "Record the full input envelope rather than treating the prompt alone as the task.",
+          "target_ids": [
+            "input_inventory"
+          ],
+          "evidence_goal": [
+            "Instructions or request given",
+            "Code or repository context supplied",
+            "Design, visual, behavior, or test references supplied",
+            "Approximate scale or amount"
+          ],
+          "evidence_probes": {
+            "e1": "What did your initial request ask the AI to do?",
+            "e2": "Could it see the relevant files or repository?",
+            "e3": "Did it have a design, behavior, or test reference?",
+            "e4": "About how many files, screens, or states were involved?"
+          },
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "focal_episode"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Which AI tool did you use, and how was it working with you: chat, editor completion, repo agent, browser agent, or another setup?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "Could it read the repo, edit files, run commands or tests, or see the browser?"
+          ],
+          "max_follow_ups": 1,
+          "transition": null,
+          "id": "tool_and_workflow",
+          "module": "Task and inputs",
+          "purpose": "Identify the product and level of access without guessing the underlying model.",
+          "target_ids": [
+            "tool_and_workflow"
+          ],
+          "evidence_goal": [
+            "Tool or product",
+            "Mode of interaction and access",
+            "Model or version if known"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "focal_episode"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "What requirements did the result have to satisfy for this particular frontend task?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What interaction had to work?",
+            "What existing visual reference or design rule mattered?",
+            "Which viewport, accessibility, browser, or test condition mattered most?",
+            "Could the AI see that requirement, or did you have to tell it?"
+          ],
+          "max_follow_ups": 1,
+          "transition": null,
+          "id": "requirements",
+          "module": "Task and inputs",
+          "purpose": "Capture constraints that determine correctness and which the AI knew about.",
+          "target_ids": [
+            "requirements"
+          ],
+          "evidence_goal": [
+            "Functional behavior",
+            "Visual or design system expectations",
+            "Relevant responsive, accessibility, browser, performance, or test constraints",
+            "Which requirements the AI was told or could inspect"
+          ],
+          "evidence_probes": {
+            "e1": "What interaction had to work?",
+            "e2": "What existing visual reference or design rule mattered?",
+            "e3": "Which viewport, accessibility, browser, or test condition mattered most?",
+            "e4": "Could the AI see that requirement, or did you have to tell it?"
+          },
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "focal_episode"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Walk me through what the AI actually did or returned in that attempt, in order.",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [],
+          "max_follow_ups": 0,
+          "transition": null,
+          "id": "ai_actions",
+          "module": "What AI did",
+          "purpose": "Recover the observable sequence from request through output.",
+          "target_ids": [
+            "ai_actions"
+          ],
+          "evidence_goal": [
+            "AI action or output",
+            "Whether it edited, generated, explained, or tested",
+            "Any follow-up instruction or retry before the failure was noticed"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "focal_episode"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Where exactly did the result fall short? Describe one specific thing the AI produced or did, and what happened instead of what you needed. If there was no observed problem, say so.",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What would a user or reviewer actually see or do when this breaks?",
+            "In which viewport, browser, state, or interaction does it show up?",
+            "What should have happened in that same state?",
+            "What could a user or reviewer not do because of that difference?",
+            "Can you give a made-up, nonconfidential example with the same structure?"
+          ],
+          "max_follow_ups": 3,
+          "transition": null,
+          "id": "failure_location",
+          "module": "Exact failure",
+          "purpose": "Obtain a concrete observed defect with expected versus actual behavior.",
+          "target_ids": [
+            "failure_location"
+          ],
+          "evidence_goal": [
+            "Specific location, UI state, behavior, or code path",
+            "Observed result",
+            "Expected result",
+            "Why the difference mattered"
+          ],
+          "evidence_probes": {
+            "e1": "In which viewport, browser, state, or interaction does it show up?",
+            "e2": "What would a user or reviewer actually see or do when this breaks?",
+            "e3": "What should have happened in that same state?",
+            "e4": "What could a user or reviewer not do because of that difference?"
+          },
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "ai_actions"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "How did you first notice the problem, and what did you have to check to confirm it?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [],
+          "max_follow_ups": 0,
+          "transition": null,
+          "id": "detection",
+          "module": "Finding and fixing it",
+          "purpose": "Capture real verification rather than assuming a test suite caught the issue.",
+          "target_ids": [
+            "detection"
+          ],
+          "evidence_goal": [
+            "Detection method",
+            "Check or reproduction steps",
+            "Whether the AI's own checks caught it"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "failure_location"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "What did you do next to make the work usable, and how much back-and-forth or manual work did that take?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What did you have to explain to the AI again?",
+            "Which parts did you end up doing yourself?",
+            "Would doing it without AI have been faster in this case?"
+          ],
+          "max_follow_ups": 3,
+          "transition": null,
+          "id": "repair",
+          "module": "Finding and fixing it",
+          "purpose": "Record concrete correction burden and whether the attempt was abandoned.",
+          "target_ids": [
+            "repair"
+          ],
+          "evidence_goal": [
+            "Fix, workaround, retry, or abandonment",
+            "Number or nature of iterations",
+            "Approximate time or effort and remaining risk"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "failure_location"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Imagine the AI got this task right on the first useful attempt. What exactly would it have delivered or changed?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What would be different in the specific state that failed?",
+            "What should it have left alone?",
+            "What information should it have asked you for if it could not know?"
+          ],
+          "max_follow_ups": 3,
+          "transition": null,
+          "id": "right_result",
+          "module": "What right looks like",
+          "purpose": "Define the desired artifact and behavior in participant terms.",
+          "target_ids": [
+            "right_result"
+          ],
+          "evidence_goal": [
+            "Expected deliverable or code change",
+            "Correct user-visible behavior",
+            "Fit with existing app or design"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "repair"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "How would you decide the result was ready to merge or ship? Walk me through the checks you would use for this task.",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "Which exact test, interaction, or comparison would have caught this failure?",
+            "What would a reviewer need to inspect even if tests passed?",
+            "What would make you trust it enough to use without a rewrite?",
+            "Who makes the final merge or ship decision for this work?",
+            "How much manual review would still be acceptable?"
+          ],
+          "max_follow_ups": 3,
+          "transition": null,
+          "id": "acceptance_checks",
+          "module": "What right looks like",
+          "purpose": "Make the success criterion observable and scorable.",
+          "target_ids": [
+            "acceptance_checks"
+          ],
+          "evidence_goal": [
+            "Functional checks or tests",
+            "Visual, responsive, accessibility, or browser checks when relevant",
+            "Who decides acceptability",
+            "What level of remaining manual review is acceptable"
+          ],
+          "evidence_probes": {
+            "e1": "Which exact test, interaction, or comparison would have caught this failure?",
+            "e2": "What would a reviewer need to inspect even if tests passed?",
+            "e3": "Who makes the final merge or ship decision for this work?",
+            "e4": "How much manual review would still be acceptable?"
+          },
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "right_result"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Has this same kind of failure happened on other frontend tasks or with other AI tools, or was this a one-off?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "What kinds of tasks tend to trigger it?",
+            "What is different when AI does succeed?"
+          ],
+          "max_follow_ups": 2,
+          "transition": null,
+          "id": "repeatability",
+          "module": "Pattern and impact",
+          "purpose": "Distinguish recurring capability gap from a single incident.",
+          "target_ids": [
+            "repeatability"
+          ],
+          "evidence_goal": [
+            "Repeat, one-off, or unknown",
+            "What varies between instances",
+            "Other tool comparison if firsthand"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "failure_location"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "How much does this limit your use of AI for frontend work today?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [
+            "Do you still use AI for this task, use it only for part of it, or avoid it?"
+          ],
+          "max_follow_ups": 1,
+          "transition": null,
+          "id": "impact",
+          "module": "Pattern and impact",
+          "purpose": "Understand practical consequence rather than inferring importance from annoyance.",
+          "target_ids": [
+            "impact"
+          ],
+          "evidence_goal": [
+            "Frequency or avoided work",
+            "Effect on time, quality, or confidence"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "required",
+          "sensitivity": "standard",
+          "phase": "core",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [
+            "failure_location"
+          ],
+          "role_variants": {},
+          "returning_role_variants": {}
+        },
+        {
+          "text": "Is there another frontend task where AI falls short in a different way that we should investigate next?",
+          "main_wording_by_ai_use": {},
+          "probe_wording_by_ai_use": {},
+          "probes": [],
+          "max_follow_ups": 0,
+          "transition": null,
+          "id": "closing",
+          "module": "Close",
+          "purpose": "Capture a second lead without diluting the focal failure.",
+          "target_ids": [
+            "closing"
+          ],
+          "evidence_goal": [
+            "Another task or explicit none"
+          ],
+          "evidence_probes": {},
+          "exploration_focus": [],
+          "do_not_assume": [
+            "The participant can paste confidential source code, private screenshots, customer data, or credentials.",
+            "The AI caused the problem rather than missing context or an integration step."
+          ],
+          "answer_requirement": "any",
+          "requirement_miss_action": "continue",
+          "priority": "optional",
+          "sensitivity": "standard",
+          "phase": "closing",
+          "visit_scope": "all",
+          "skip_remaining_module_if_not_applicable": false,
+          "always_ask": false,
+          "depends_on": [],
+          "role_variants": {},
+          "returning_role_variants": {}
+        }
+      ],
+      "conversation_policy": null,
+      "conversation_follow_up_budget": 10,
+      "orchestration_profile": "semi_structured",
+      "closing_message": "Thank you for walking through that example. This completes the interview. Please use the return button to go back to Prolific.",
+      "allow_follow_ups": true,
+      "skip_answered_questions": true,
+      "probe_selection": "relevance",
+      "allow_emergent_follow_ups": false,
+      "allow_story_follow_up": false,
+      "max_quality_repairs": 4
+    },
+    "silence_timeout_seconds": null,
+    "silence_prompt": null,
+    "twilio_phone_number": null,
+    "store_audio": false,
+    "track_engagement": false,
+    "engagement_config": null,
+    "adaptive_enabled": false,
+    "adaptive_policy": null
+  }
+}

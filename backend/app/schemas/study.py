@@ -124,6 +124,7 @@ class ResearchSpec(BaseModel):
     """Versioned study design, independent of any one interview agent."""
 
     version: str = Field("0.1", min_length=1, max_length=32)
+    privacy_profile: Literal["standard", "work_high_risk"] = "standard"
     stage: Literal["pilot", "field"] = "pilot"
     method: Literal[
         "exploration",

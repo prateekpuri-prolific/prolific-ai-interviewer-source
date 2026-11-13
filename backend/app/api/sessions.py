@@ -23,7 +23,10 @@ from app.models.agent import Agent
 from app.models.engagement import AdaptiveAction, EngagementEvent, EngagementTurn
 from app.models.session import Session, SessionStatus, TranscriptEntry
 from app.models.privacy_lifecycle import PrivacyDeletionReceipt
-from app.privacy import redact_json, redact_session_data, redact_text
+from app.privacy import (
+    privacy_profile_for_session, redact_for_profile, redact_json,
+    redact_session_data, redact_text,
+)
 from app.realtime import publish_transcript_event
 from app.audio.storage import build_session_prefix, get_audio_storage
 from app.schemas.session import (
@@ -224,7 +227,8 @@ async def export_sessions_csv(
         batch_sessions = batch_result.scalars().all()
 
         for session in batch_sessions:
-            completion, _ = redact_json(session.completion_metadata or {})
+            profile = privacy_profile_for_session(session)
+            completion, _ = redact_json(session.completion_metadata or {}, profile=profile)
             protocol_completion = completion.get("protocol") or {}
             participant_experience = completion.get("participant_experience") or {}
             completion_fields = [
@@ -234,7 +238,7 @@ async def export_sessions_csv(
                 participant_experience.get("initial_response_mode") or "",
                 participant_experience.get("microphone_check_status") or "",
             ]
-            feedback, _ = redact_json(session.post_interview_feedback or {})
+            feedback, _ = redact_json(session.post_interview_feedback or {}, profile=profile)
             feedback_fields = [
                 feedback.get("naturalness_rating", ""),
                 feedback.get("repeated_questions", ""),
@@ -302,7 +306,7 @@ async def export_sessions_csv(
                         *feedback_fields,
                         entry.sequence,
                         entry.role.value,
-                        redact_text(entry.content).text,
+                        redact_for_profile(entry.content, profile).text,
                         entry.spoken_at.isoformat(),
                         eng.score if eng else "",
                         eng.label if eng else "",
@@ -373,6 +377,7 @@ async def export_sessions_json(
         batch_sessions = batch_result.scalars().all()
 
         for session in batch_sessions:
+            profile = privacy_profile_for_session(session)
             engagement_rows = sorted(
                 session.engagement_turns, key=lambda e: e.transcript_sequence
             )
@@ -391,8 +396,8 @@ async def export_sessions_json(
                     session.participant_consent_at.isoformat()
                     if session.participant_consent_at else None
                 ),
-                "completion_metadata": redact_json(session.completion_metadata)[0],
-                "post_interview_feedback": redact_json(session.post_interview_feedback)[0],
+                "completion_metadata": redact_json(session.completion_metadata, profile=profile)[0],
+                "post_interview_feedback": redact_json(session.post_interview_feedback, profile=profile)[0],
                 "post_interview_feedback_submitted_at": (
                     session.post_interview_feedback_submitted_at.isoformat()
                     if session.post_interview_feedback_submitted_at else None
@@ -403,7 +408,7 @@ async def export_sessions_json(
                     {
                         "sequence": entry.sequence,
                         "role": entry.role.value,
-                        "content": redact_text(entry.content).text,
+                        "content": redact_for_profile(entry.content, profile).text,
                         "spoken_at": entry.spoken_at.isoformat(),
                         "prompt_tokens": entry.prompt_tokens,
                         "completion_tokens": entry.completion_tokens,
@@ -714,10 +719,11 @@ async def get_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     detail = SessionDetailRead.model_validate(session)
-    detail.completion_metadata = redact_json(detail.completion_metadata)[0]
-    detail.post_interview_feedback = redact_json(detail.post_interview_feedback)[0]
+    profile = privacy_profile_for_session(session)
+    detail.completion_metadata = redact_json(detail.completion_metadata, profile=profile)[0]
+    detail.post_interview_feedback = redact_json(detail.post_interview_feedback, profile=profile)[0]
     for entry in detail.entries:
-        entry.content = redact_text(entry.content).text
+        entry.content = redact_for_profile(entry.content, profile).text
     return detail
 
 

@@ -17,6 +17,7 @@ from app.privacy import (
     redact_session_data,
     redact_text,
     redact_text_with_llm,
+    redact_work_text,
 )
 
 
@@ -52,6 +53,40 @@ def test_redacts_direct_and_contextual_identifiers(label, value, secret, placeho
 def test_does_not_redact_common_product_names_or_approximate_time():
     value = "I compared ChatGPT with Microsoft Copilot about three months ago."
     assert redact_text(value).text == value
+
+
+def test_work_interview_keeps_concrete_task_context():
+    value = (
+        "I work at Acme on a Next.js dashboard. GPT-5.6 changed the menu "
+        "at 768px; the Figma reference at https://example.com/spec showed it "
+        "should close when the viewport narrows. I also checked 1280 x 1024."
+    )
+    assert redact_work_text(value).text == value
+
+
+def test_work_interview_removes_only_high_risk_spans():
+    value = (
+        "The grid failed at 768px. The API key is abcdefghijklmnop and my "
+        "email is alex@example.com. I tested it on November 13, 2026."
+    )
+    result = redact_work_text(value)
+    assert "The grid failed at 768px" in result.text
+    assert "November 13, 2026" in result.text
+    assert "abcdefghijklmnop" not in result.text
+    assert "alex@example.com" not in result.text
+    assert result.counts == {"credential": 1, "email": 1}
+    assert redact_work_text(result.text).text == result.text
+
+
+def test_work_interview_removes_personal_harm_without_losing_failure():
+    value = (
+        "My colleague was diagnosed with cancer. "
+        "The responsive menu still failed at 768px."
+    )
+    result = redact_work_text(value)
+    assert result.text == (
+        "[SENSITIVE_CONTENT_REMOVED] The responsive menu still failed at 768px."
+    )
 
 
 @pytest.mark.parametrize("text", [

@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.session import Session, SessionStatus, SpeakerRole, TranscriptEntry
-from app.privacy import REDACTOR_VERSION
+from app.privacy import REDACTOR_VERSION, WORK_REDACTOR_VERSION
 
 
 def _mock_litellm_response(content: str = "Hello"):
@@ -20,6 +20,15 @@ def _mock_litellm_response(content: str = "Hello"):
     response.choices = [choice]
     response.usage = usage
     return response
+
+
+def test_work_scope_question_routes_design_led_coding_clarification():
+    from app.api.text_chat import _work_scope_question
+
+    assert _work_scope_question(
+        "Is it okay if I describe a design situation, or must it be a dev situation?"
+    )
+    assert not _work_scope_question("I adjusted the design of the menu at 768px.")
 
 
 class TestCallLlm:
@@ -453,7 +462,7 @@ async def test_synthetic_pii_disclosure_warns_continues_and_never_persists_or_ex
     assert any(item.get("type") == "finalized" for item in websocket.sent)
 
     assert mock_llm.await_count == 2
-    redirects = [item for item in websocket.sent if item.get("text", "").startswith("Please keep your answer general,")]
+    redirects = [item for item in websocket.sent if item.get("text", "").startswith("I couldn't use that answer.")]
     assert len(redirects) == 2
     all_model_messages = str(
         [call.kwargs["messages"] for call in mock_llm.await_args_list]
@@ -509,3 +518,116 @@ async def test_synthetic_pii_disclosure_warns_continues_and_never_persists_or_ex
     assert "[SENSITIVE_CONTENT_REMOVED]" in export.text
     assert "[POTENTIALLY_IDENTIFYING_CONTEXT_REMOVED]" in export.text
     assert model_reply in export.text
+
+
+@pytest.mark.asyncio
+async def test_work_interview_preserves_failure_detail_without_privacy_interruption(
+    monkeypatch, db_session_factory, client, make_study, make_agent
+):
+    import app.api.text_chat as text_chat
+
+    study = make_study(title="Work privacy regression")
+    study.research_spec = {
+        "version": "frontend-ai-failures-v0.6",
+        "privacy_profile": "work_high_risk",
+        "participant_information": {"consent_required": True},
+    }
+    agent = make_agent(
+        study_id=study.id, name="Work interviewer", welcome_message="What happened?"
+    )
+    async with db_session_factory() as db:
+        db.add_all([study, agent])
+        await db.commit()
+
+    answer = (
+        "GPT-5.6 built the menu in Next.js, but at 768px it stayed open after "
+        "the viewport narrowed. I work at Acme; email alex@example.com if needed."
+    )
+    websocket = _SyntheticParticipantSocket(
+        [{"type": "message", "text": answer}, {"type": "finish"}]
+    )
+    mock_llm = AsyncMock(return_value={
+        "content": "How did you verify the menu state?",
+        "prompt_tokens": 10,
+        "completion_tokens": 8,
+    })
+    monkeypatch.setattr(text_chat, "async_session_factory", db_session_factory)
+    monkeypatch.setattr(text_chat, "validate_agent_pipeline_config", AsyncMock(return_value=[]))
+    monkeypatch.setattr(text_chat, "register_session", AsyncMock())
+    monkeypatch.setattr(text_chat, "unregister_session", AsyncMock())
+    monkeypatch.setattr(text_chat, "publish_transcript_event", AsyncMock())
+    monkeypatch.setattr(text_chat, "_call_llm", mock_llm)
+    await text_chat.text_chat_ws(
+        websocket, agent.widget_key, pid=None, external_study_id=None,
+        external_session_id=None, consent=True, response_mode="text",
+        mic_check_status=None,
+    )
+
+    assert not any(item.get("type") == "privacy_warning" for item in websocket.sent)
+    assert mock_llm.await_count == 1
+    model_messages = str(mock_llm.await_args.kwargs["messages"])
+    assert "GPT-5.6" in model_messages
+    assert "768px" in model_messages
+    assert "Acme" in model_messages
+    assert "alex@example.com" not in model_messages
+
+    async with db_session_factory() as db:
+        session = await db.scalar(select(Session).where(Session.agent_id == agent.id))
+        assert session.completion_metadata["privacy"]["redactor_version"] == WORK_REDACTOR_VERSION
+    export = await client.get(
+        f"/api/studies/{study.id}/agents/{agent.id}/sessions/export/json"
+    )
+    assert export.status_code == 200
+    assert "GPT-5.6" in export.text
+    assert "768px" in export.text
+    assert "Acme" in export.text
+    assert "alex@example.com" not in export.text
+
+
+@pytest.mark.asyncio
+async def test_work_interview_accepts_honest_no_failure_without_reasking(
+    monkeypatch, db_session_factory, make_study, make_agent
+):
+    import app.api.text_chat as text_chat
+    from app.models.agent import InterviewMode
+
+    study = make_study(title="No failure regression")
+    study.research_spec = {
+        "version": "frontend-ai-failures-v0.6",
+        "privacy_profile": "work_high_risk",
+        "participant_information": {"consent_required": True},
+    }
+    agent = make_agent(study_id=study.id, welcome_message="Are you ready?")
+    agent.interview_mode = InterviewMode.STRUCTURED
+    agent.interview_guide = {
+        "orchestration_profile": "semi_structured",
+        "questions": [
+            {"id": "focal_episode", "text": "What was the frontend task?",
+             "evidence_goal": ["Recent task"]},
+            {"id": "failure_location", "text": "What failed?",
+             "evidence_goal": ["Observed failure"]},
+        ],
+        "closing_message": "Thank you.",
+    }
+    async with db_session_factory() as db:
+        db.add_all([study, agent])
+        await db.commit()
+    websocket = _SyntheticParticipantSocket([
+        {"type": "message", "text": "I don't recall a clear failure."}
+    ])
+    mock_llm = AsyncMock()
+    monkeypatch.setattr(text_chat, "async_session_factory", db_session_factory)
+    monkeypatch.setattr(text_chat, "validate_agent_pipeline_config", AsyncMock(return_value=[]))
+    monkeypatch.setattr(text_chat, "register_session", AsyncMock())
+    monkeypatch.setattr(text_chat, "unregister_session", AsyncMock())
+    monkeypatch.setattr(text_chat, "publish_transcript_event", AsyncMock())
+    monkeypatch.setattr(text_chat, "_call_llm", mock_llm)
+    await text_chat.text_chat_ws(
+        websocket, agent.widget_key, pid=None, external_study_id=None,
+        external_session_id=None, consent=True, response_mode="text",
+        mic_check_status=None,
+    )
+    mock_llm.assert_not_called()
+    assert any(item.get("reason") == "no_matching_episode" for item in websocket.sent)
+    assert not any("What failed?" in item.get("text", "") for item in websocket.sent)
+    assert any(item.get("type") == "finalized" for item in websocket.sent)

@@ -230,7 +230,7 @@ def test_problem_episode_gate_repairs_then_accepts_matching_example():
         "I used it to make a presentation for a client.",
     )
     assert repair.reason == "answer_requirement_repair"
-    assert "still fell short" in repair.text
+    assert "if anything, fell short" in repair.text
     assert repair.closed is False
 
     accepted = controller.review_turn(
@@ -247,6 +247,54 @@ def test_problem_episode_gate_repairs_then_accepts_matching_example():
     assert accepted.text == "What did you do next?"
     assert accepted.closed is False
     assert controller.stats()["answer_requirements_met"] == 1
+
+
+def test_closing_invitation_accepts_no_second_failure():
+    from app.pipeline.interview_guide import question_answer_requirement
+
+    closing = {
+        "id": "closing",
+        "phase": "closing",
+        "text": "Is there another frontend task where AI falls short?",
+        "purpose": "Capture a second lead without diluting the focal failure.",
+    }
+    assert question_answer_requirement(closing) == "any"
+
+
+def test_withheld_answer_advances_without_reasking():
+    guide = {
+        "orchestration_profile": "semi_structured",
+        "questions": [
+            {"id": "task", "text": "What was the task?", "evidence_goal": ["Task"]},
+            {"id": "failure", "text": "What failed?", "evidence_goal": ["Failure"]},
+        ],
+    }
+    controller = TextStructuredController(guide)
+    controller.review_turn(
+        "What was the task?", 1,
+        TurnDecision(action="main", question=1, intent="task:main"),
+    )
+    assert controller.advance_after_withheld_answer() == "What failed?"
+    assert controller.current_question_index == 1
+    assert controller.current_prompt_text == "What failed?"
+
+
+def test_covered_dependency_does_not_force_a_repeat():
+    guide = {
+        "skip_answered_questions": True,
+        "questions": [
+            {"id": "task", "text": "What was the task?", "evidence_goal": ["Task"]},
+            {"id": "inputs", "text": "What inputs did it have?", "depends_on": ["task"],
+             "evidence_goal": ["Inputs"]},
+            {"id": "failure", "text": "What failed?", "depends_on": ["inputs"],
+             "evidence_goal": ["Failure"]},
+        ],
+    }
+    controller = TextStructuredController(guide)
+    tracker = controller._evidence
+    tracker._resolutions["task:e1"] = "covered"
+    tracker._resolutions["inputs:e1"] = "covered"
+    assert tracker.safe_next_index(0) == 2
 
 
 def test_problem_episode_gate_ends_without_manufacturing_a_failure():

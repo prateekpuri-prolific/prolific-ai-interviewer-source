@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 REDACTOR_VERSION = "interview-pii-v4"
+WORK_REDACTOR_VERSION = "work-interview-high-risk-v1"
 PRIVACY_WARNING = (
     "I removed identifying details or highly sensitive information from your "
     "response. Please avoid sharing names, contact details, addresses, account "
@@ -277,6 +278,89 @@ def redact_text(value: str) -> RedactionResult:
     return RedactionResult(text=text, counts=dict(counts))
 
 
+# Work interviews ask for concrete implementation details. Product names,
+# project context, dates, URLs, and ordinary names are evidence, not secrets.
+# Keep this profile to unmistakable contact details, private account identifiers,
+# physical addresses, and credentials; redact the matched span, never the answer.
+_WORK_HIGH_RISK_CATEGORIES = {
+    "email_fragment", "credential", "government_id", "address",
+}
+_WORK_SECRET_ASSIGNMENT = re.compile(
+    r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|client[_ -]?secret)"
+    r"\s*(?:=|:|is)\s*[\"']?[A-Za-z0-9_./+=-]{8,}[\"']?",
+    re.I,
+)
+_WORK_EMAIL = re.compile(
+    r"\b[a-z0-9._%+-]+\s*(?:@|\[at\]|\(at\))\s*[a-z0-9.-]+"
+    r"\s*(?:\.|\[dot\]|\(dot\)|\sdot\s)[a-z]{2,}\b",
+    re.I,
+)
+_WORK_SPOKEN_EMAIL = re.compile(
+    r"\b(?:email|e-mail)\s+(?:address\s+)?(?:is\s+)?"
+    r"[a-z0-9._%+-]+\s+at\s+[a-z0-9-]+\s+dot\s+[a-z]{2,}\b",
+    re.I,
+)
+_WORK_PERSONAL_ID = re.compile(
+    r"\b(?:bank account|customer account|patient id|member id|employee id|"
+    r"credit card|debit card|routing number)\s*(?:number|no\.?|id)?\s*"
+    r"(?:is|:|#|-)?\s*[A-Z0-9][A-Z0-9-]{5,}\b",
+    re.I,
+)
+_WORK_PHONE = re.compile(
+    r"(?<!\w)(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]?"
+    r"\d{3}[ .-]?\d{4}(?!\w)"
+)
+_WORK_SPECIFIC_PERSON_HARM = re.compile(
+    r"\b(?:my|our)\s+(?:child|son|daughter|patient|student|client|colleague|"
+    r"coworker|partner|spouse|mother|father|friend)\b.{0,100}"
+    r"\b(?:was diagnosed with|is receiving treatment for|self[- ]?harmed|"
+    r"attempted suicide|was sexually assaulted|was abused)\b",
+    re.I,
+)
+
+
+def redact_work_text(value: str) -> RedactionResult:
+    """Minimise high-risk spans while preserving a professional task account."""
+    text = str(value or "")
+    counts: Counter[str] = Counter()
+    text, replacements = _WORK_SECRET_ASSIGNMENT.subn("[CREDENTIAL]", text)
+    counts["credential"] += replacements
+    for pattern in (_WORK_EMAIL, _WORK_SPOKEN_EMAIL):
+        text, replacements = pattern.subn("[EMAIL]", text)
+        counts["email"] += replacements
+    for category, token, pattern in (
+        ("account_id", "[IDENTIFIER]", _WORK_PERSONAL_ID),
+        ("phone_or_id", "[PHONE_OR_ID]", _WORK_PHONE),
+    ):
+        text, replacements = pattern.subn(token, text)
+        counts[category] += replacements
+    for category, token, pattern in _PATTERNS:
+        if category not in _WORK_HIGH_RISK_CATEGORIES or category == "email":
+            continue
+        text, replacements = pattern.subn(token, text)
+        counts[category] += replacements
+    # Only an explicit disclosure about a specific person's severe harm or
+    # condition is removed, and only its sentence. The task detail survives.
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    for index, sentence in enumerate(sentences):
+        if _FIRST_PERSON_SPECIAL_CATEGORY.search(sentence) or _WORK_SPECIFIC_PERSON_HARM.search(sentence):
+            sentences[index] = _SENSITIVE_CONTENT_TOKEN
+            counts["special_category"] += 1
+    text = " ".join(sentences)
+    return RedactionResult(text=text, counts={k: v for k, v in counts.items() if v})
+
+
+def privacy_profile_for_session(session: Any) -> str:
+    """Use the consented protocol snapshot, not today's editable study settings."""
+    snapshot = getattr(session, "protocol_snapshot", None) or {}
+    spec = snapshot.get("research_spec") or {}
+    return "work_high_risk" if spec.get("privacy_profile") == "work_high_risk" else "standard"
+
+
+def redact_for_profile(value: str, profile: str = "standard") -> RedactionResult:
+    return redact_work_text(value) if profile == "work_high_risk" else redact_text(value)
+
+
 async def redact_text_with_llm(
     value: str,
     *,
@@ -354,24 +438,24 @@ async def redact_text_with_llm(
     return RedactionResult(text=token, counts=dict(counts))
 
 
-def redact_json(value: Any) -> tuple[Any, Counter[str]]:
+def redact_json(value: Any, *, profile: str = "standard") -> tuple[Any, Counter[str]]:
     """Recursively redact string values in JSON-compatible data."""
     counts: Counter[str] = Counter()
     if isinstance(value, str):
-        result = redact_text(value)
+        result = redact_for_profile(value, profile)
         counts.update(result.counts)
         return result.text, counts
     if isinstance(value, list):
         output = []
         for item in value:
-            safe, item_counts = redact_json(item)
+            safe, item_counts = redact_json(item, profile=profile)
             output.append(safe)
             counts.update(item_counts)
         return output, counts
     if isinstance(value, dict):
         output = {}
         for key, item in value.items():
-            safe, item_counts = redact_json(item)
+            safe, item_counts = redact_json(item, profile=profile)
             output[key] = safe
             counts.update(item_counts)
         return output, counts
@@ -399,6 +483,7 @@ async def redact_session_data(
     *,
     session=None,
     ingress_counts: Counter[str] | dict[str, int] | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Defense-in-depth sweep of transcript and derived session text.
 
@@ -409,27 +494,28 @@ async def redact_session_data(
 
     if session is None:
         session = await db.get(Session, session_id)
+    profile = profile or (privacy_profile_for_session(session) if session else "standard")
 
     counts: Counter[str] = Counter()
     result = await db.execute(
         select(TranscriptEntry).where(TranscriptEntry.session_id == session_id)
     )
     for entry in result.scalars():
-        redacted = redact_text(entry.content)
+        redacted = redact_for_profile(entry.content, profile)
         if redacted.detected:
             entry.content = redacted.text
             counts.update(redacted.counts)
 
     if session is not None:
-        metadata, metadata_counts = redact_json(session.completion_metadata)
-        feedback, feedback_counts = redact_json(session.post_interview_feedback)
+        metadata, metadata_counts = redact_json(session.completion_metadata, profile=profile)
+        feedback, feedback_counts = redact_json(session.post_interview_feedback, profile=profile)
         counts.update(metadata_counts)
         counts.update(feedback_counts)
         session.post_interview_feedback = feedback
 
         ingress = Counter(ingress_counts or {})
         privacy = {
-            "redactor_version": REDACTOR_VERSION,
+            "redactor_version": WORK_REDACTOR_VERSION if profile == "work_high_risk" else REDACTOR_VERSION,
             "ingress_redaction_count": sum(ingress.values()),
             "ingress_categories": dict(sorted(ingress.items())),
             "completion_redaction_count": sum(counts.values()),
@@ -441,7 +527,7 @@ async def redact_session_data(
         session.completion_metadata = metadata
 
     return {
-        "redactor_version": REDACTOR_VERSION,
+        "redactor_version": WORK_REDACTOR_VERSION if profile == "work_high_risk" else REDACTOR_VERSION,
         "count": sum(counts.values()),
         "categories": dict(sorted(counts.items())),
     }

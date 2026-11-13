@@ -747,6 +747,10 @@ def question_answer_requirement(question: dict) -> str:
     configured = str(question.get("answer_requirement") or "any")
     if configured != "any":
         return configured
+    # A closing invitation to mention another lead is not a second gate on
+    # whether the focal task failed. Accept "no other task" at face value.
+    if question.get("phase") == "closing":
+        return "any"
     # Backward compatibility for already-fielded guides created before the
     # explicit field existed. Keep the inference narrow: a concrete focal
     # task/episode plus an explicit failure premise.
@@ -2877,7 +2881,9 @@ class EvidenceStateTracker:
             return None
         for dependency in self._questions[requested_index].get("depends_on") or []:
             dependency_index = self._question_positions.get(str(dependency))
-            if dependency_index is not None and not self._main_asked(dependency_index):
+            if (dependency_index is not None
+                    and not self._main_asked(dependency_index)
+                    and not self._question_skippable(dependency_index)):
                 return dependency_index
         return None
 
@@ -3792,7 +3798,7 @@ class EvidenceStateTracker:
         if re.search(
             r"\b(?:context|constraints?|requirements?)\b", evidence
         ):
-            return "What important constraints or prior context, if any, did you give it?"
+            return "Was there one requirement the AI could not see or infer? If none, that's fine."
         if re.search(
             r"\b(?:input|instruction|prompt|source material|"
             r"context supplied|constraint supplied)\b",
@@ -3904,9 +3910,8 @@ class EvidenceStateTracker:
             )
             return TurnReview(
                 text=(
-                    "It sounds like that task may have mostly worked. Was there "
-                    "something about the result that still fell short, or is "
-                    "there a different recent task that would be a better fit?"
+                    "What, if anything, fell short in that attempt? If nothing "
+                    "did, we can use a different example or move on."
                 ),
                 marker=None,
                 decision=TurnDecision(
@@ -5280,6 +5285,31 @@ class TextStructuredController:
     @property
     def closing_message(self) -> str:
         return str(self._closing or DEFAULT_CLOSING).strip()
+
+    def advance_after_withheld_answer(self) -> str:
+        """Treat an unusable privacy-redacted answer as a skip, never a retry."""
+        index = self.current_question_index
+        if not 0 <= index < len(self._questions):
+            self._closed = True
+            return self.closing_message
+        catalog = self._evidence._catalog[index]
+        self._evidence._asked_intents.add(str(catalog["main"]))
+        self._evidence._asked_main_indices.add(index)
+        for evidence_id in catalog["evidence"]:
+            self._evidence._resolutions.setdefault(evidence_id, "declined")
+        self._evidence._requirements_satisfied.add(index)
+        review = self._evidence._replacement(index + 1, "withheld_answer_skip")
+        if review.closed:
+            self._closed = True
+            self.current_question_index = len(self._questions)
+        elif review.question_index is not None:
+            self.sync_to_marker(review.question_index + 1)
+            self._last_question_text = review.text
+            self._question_indices_asked.add(review.question_index)
+            self._delivered_questions.setdefault(review.question_index, set()).add(
+                self._question_wording_key(review.text)
+            )
+        return review.text
 
     @property
     def needs_evidence_judge(self) -> bool:
