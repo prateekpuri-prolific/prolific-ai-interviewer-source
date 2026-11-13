@@ -1958,6 +1958,25 @@ task in the next question so references such as "that task" stay unambiguous.
 """
 
     prompt = base_prompt.rstrip() + structured_section
+    if questions[-1].get("phase") == "closing" and questions[-1].get("max_follow_ups", 0) > 0:
+        prompt += """
+
+### Optional closing follow-up
+Answering the final main question is not automatically the final answer.
+Interpret the entire answer to the final invitation. If it supplies a genuinely
+new example but leaves the concrete mismatch unclear, ask one focused question
+under the final card's listed probe intent. Do not reinterpret that answer as
+a revision of the original episode. If it supplies no new example, expresses
+uncertainty or a wish to finish, close immediately. A no followed by a concrete
+new example is not a refusal of that example. Do not infer missing technical
+details from ambiguous wording. After this one follow-up answer, close.
+When a new example is already concrete enough, briefly acknowledge the specific
+new detail before the closing message rather than asking redundant questions.
+This content-grounded acknowledgment is permitted before the exact closing text.
+For an unclear mismatch, ask what the named artifact looked like or did versus
+what was wanted. Do not supply a technical interpretation of an ambiguous word.
+Always emit action=close metadata when delivering the final closing message.
+"""
     if emit_progress:
         prompt += turn_decision_instruction(
             questions, allow_follow_ups, skip_answered_questions
@@ -5499,6 +5518,14 @@ class TextStructuredController:
     ) -> TurnReview:
         """Validate the model's proposed turn and replace semantic repeats."""
         index = self.current_question_index
+        if (decision is None and 0 <= index < len(self._questions)
+                and index in self._question_indices_asked
+                and self._questions[index].get("phase") == "closing"
+                and classify_participant_turn(participant_text, self._language) == "answer"
+                and str(text or "").strip() == self.closing_message):
+            # A complete canonical goodbye is a closing even if the model
+            # omitted its hidden metadata. Otherwise the UI can wait forever.
+            decision = TurnDecision(action="close")
         if (
             0 <= index < len(self._questions)
             and index in self._question_indices_asked

@@ -4237,3 +4237,30 @@ def test_scope_paraphrase_keeps_model_answer_and_holds_guide(question):
 ])
 def test_scope_detection_preserves_substantive_answers(answer):
     assert classify_participant_turn(answer) == 'answer'
+
+def test_optional_closing_uses_one_followup_then_finishes_even_without_marker():
+    guide = {'orchestration_profile': 'exploratory', 'questions': [
+        {'id': 'closing', 'phase': 'closing', 'text': 'Anything else?',
+         'max_follow_ups': 1, 'probes': ['What happened?'],
+         'evidence_goal': ['Other example', 'Concrete mismatch']}],
+        'closing_message': 'Thank you. This completes the interview.'}
+    c = TextStructuredController(guide)
+    c.review_turn('Anything else?', 1, TurnDecision(action='main', question=1, intent='closing:main'), '')
+    c.register_bot_turn('')
+    assert c.maybe_advance_message('Another task was email signatures.') is None
+    c.review_turn('What happened?', None, TurnDecision(action='probe', question=1, intent='closing:p1'), 'Another task was email signatures.')
+    c.register_bot_turn('Another task was email signatures.')
+    assert c.maybe_advance_message('It changed the spacing.') is not None
+    review = c.review_turn(guide['closing_message'], None, None, 'It changed the spacing.')
+    assert review.closed
+
+
+def test_canonical_goodbye_finishes_without_metadata_or_budget_nudge():
+    guide = {'orchestration_profile': 'exploratory', 'questions': [
+        {'id': 'closing', 'phase': 'closing', 'text': 'Anything else?',
+         'max_follow_ups': 1, 'probes': ['What happened?']}],
+        'closing_message': 'Thank you. This completes the interview.'}
+    c = TextStructuredController(guide)
+    c.review_turn('Anything else?', 1, TurnDecision(action='main', question=1, intent='closing:main'), '')
+    review = c.review_turn(guide['closing_message'], None, None, 'Nothing more to add today.')
+    assert review.closed

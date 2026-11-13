@@ -24,6 +24,31 @@ def revise(config: dict, revision: int = 1) -> dict:
     spec['participant_information']['purpose_summary'] = 'Understand concrete AI failures in UI design and implementation, including visual and interaction quality.'
     spec['interviewer_stance']['disclosure'] = 'An AI interviewer asks about one firsthand UI design or implementation experience. It does not assess the participant’s skill.'
     spec['decision_to_inform'] = 'Identify recurring AI failures in UI design and implementation with concrete inputs, observed results, and criteria for a successful result.'
+    if revision >= 3:
+        closing = agent['interview_guide']['questions'][-1]
+        closing.update(
+            max_follow_ups=1,
+            purpose='Accept no further example and close. If a genuinely new lead is offered, acknowledge it and ask at most one useful concrete detail, then close.',
+            evidence_goal=['Another task or explicit none', 'One concrete mismatch if a new task is offered'],
+            probes=['What is one concrete thing the AI got wrong in that other task?'],
+        )
+        agent['system_prompt'] += (
+            ' At the optional final invitation, no, none, uncertainty, and a wish to finish '
+            'are valid reasons to close immediately. A no followed by a concrete example '
+            'still offers a lead: interpret the entire answer. When a genuinely new task '
+            'is offered, acknowledge its specific content and ask at most one focused '
+            'question for a missing concrete mismatch. If that mismatch is already '
+            'clear, acknowledge it and close. Do not launch another full interview '
+            'or reopen the first task. After the final follow-up answer, close.'
+        )
+    if revision >= 4:
+        closing['purpose'] += (
+            ' For vague or ambiguous failures, ask what output they got versus '
+            'what they wanted using only the task or artifact they explicitly named. '
+            'Do not turn a vague word into a technical requirement or hypothesize '
+            'an accessibility, browser, or architecture issue. If the lead is already '
+            'concrete, acknowledge that specific lead before closing.'
+        )
     spec['targets'] = [dict(id=q['id'], name=q['id'].replace('_', ' '),
         description=q['purpose'], evidence_needed=q['evidence_goal'],
         do_not_infer=['Do not infer population prevalence or model root cause from one account.'],
