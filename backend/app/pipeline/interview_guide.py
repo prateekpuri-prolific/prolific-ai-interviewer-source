@@ -64,6 +64,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 _CLARIFICATION_PATTERNS_BY_LANG: dict[str, list[str]] = {
     "en": [
+        r"\b(?:would|does|could) (?:a|an|my|this|that) [^?.!]{0,100}\b(?:example|situation|task|problem|case)\b[^?.!]{0,30}\b(?:fit|count|qualify)\b",
+        r"\bis (?:that|this|it) (?:a |an )?(?:suitable|acceptable|valid|relevant) (?:example|case|topic|situation)\b",
+        r"\b(?:is it (?:ok|okay) if i|can i|could i|may i) (?:describe|discuss|talk about|use)\b",
         r"\bwhat do you mean\b",
         r"\b(?:closer|further|farther) to what\b",
         r"\b(?:i )?(?:forgot|forget|lost track of) (?:what|which|the|your).*question",

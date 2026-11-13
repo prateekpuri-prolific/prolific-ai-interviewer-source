@@ -4215,3 +4215,25 @@ class TestEvidenceProvenanceLedger:
         assert "MANDATORY CONTINUITY BRIDGE" in prompt
         assert 'Never say that they "answered part of the next' in prompt
         assert 'question," "satisfied criteria,"' in prompt
+
+@pytest.mark.parametrize('question', [
+    'Would a visual design example fit, or do you need code?',
+    'Does a Figma layout problem qualify even though I did not implement it?',
+    'The issue was making an animation for a website. I never edited code in that attempt. Is that a suitable example?',
+])
+def test_scope_paraphrase_keeps_model_answer_and_holds_guide(question):
+    assert classify_participant_turn(question) == 'clarification'
+    c = TextStructuredController({'questions': [{'id': 'task', 'text': 'What was your task?'}]})
+    reply = 'Yes, a UI design example fits. Would you like to continue?'
+    review = c.review_turn(reply, None, TurnDecision(action='clarify', question=1), question)
+    assert 'UI design example fits' in review.text
+    assert 'What was your task' not in review.text
+    assert c.current_question_index == 0
+
+@pytest.mark.parametrize('answer', [
+    'The visual design did not fit our website.',
+    'Would I use it? No, it missed the brand entirely.',
+    'I used a Figma layout as my example and the output was wrong.',
+])
+def test_scope_detection_preserves_substantive_answers(answer):
+    assert classify_participant_turn(answer) == 'answer'
